@@ -19,10 +19,29 @@ function process(input) {
   const body = []
   switch (input.node.type) {
     case 'module':
+      processModule(input)
       break
+    case 'import_statement':
+      processImportStatement(input)
+      break
+    case 'comment':
+      break
+    case 'expression_statement':
     default:
       throwNode(input.node)
   }
+  return body
+}
+
+function processImportStatement(input) {
+  // no support for this for now.
+}
+
+function processModule(input) {
+  const body = []
+  input.node.children.forEach(node => {
+    body.push(...process({ ...input, node }))
+  })
   return body
 }
 
