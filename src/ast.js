@@ -27,10 +27,40 @@ function process(input) {
     case 'comment':
       break
     case 'expression_statement':
+      processExpressionStatement(input)
+      break
+    case 'assignment':
+      processAssignment(input)
+      break
     default:
       throwNode(input.node)
   }
   return body
+}
+
+function processAssignment(input) {
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case 'identifier':
+        break
+      default:
+        throwNode(node)
+    }
+  })
+}
+
+function processExpressionStatement(input) {
+  let statement
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case 'assignment':
+        processAssignment({ ...input, node })
+        break
+      default:
+        throwNode(node)
+    }
+  })
+  return statement
 }
 
 function processImportStatement(input) {
