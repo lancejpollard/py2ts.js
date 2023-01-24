@@ -60,10 +60,15 @@ function convert(string) {
 
 function process(input) {
   switch (input.node.type) {
+    case 'assignment':
+      processAssignment(input)
+      break
     default:
       throwNode(input.node)
   }
 }
+
+function processAssignment(input) {}
 
 function throwNode(node, ctx) {
   console.log(node)
