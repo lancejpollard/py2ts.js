@@ -22,6 +22,20 @@ async function start() {
     convert(fs.readFileSync('fixtures/stereographic.py', 'utf-8')),
   )
 
+  fs.writeFileSync(
+    'fixtures/utils.ast.json',
+    JSON.stringify(
+      print(fs.readFileSync('fixtures/utils.py', 'utf-8')),
+      null,
+      2,
+    ),
+  )
+
+  fs.writeFileSync(
+    'tmp/utils.ts',
+    convert(fs.readFileSync('fixtures/utils.py', 'utf-8')),
+  )
+
   // await convert.lint('tmp/stereographic.ts')
 }
 

@@ -12,7 +12,6 @@ async function lint(path) {
     useEslintrc: false,
   })
 
-  console.log('here')
   // 2. Lint files.
   const results = await eslint.lintFiles([path])
 
@@ -59,6 +58,7 @@ function convert(string) {
     body,
     module,
     path: [],
+    initialized: {},
   }
 
   tree.body.forEach(node => {
@@ -116,6 +116,9 @@ function process(input) {
     case 'integer':
       processInteger(input)
       break
+    case 'while_statement':
+      processWhileStatement(input)
+      break
     case 'float':
       processFloat(input)
       break
@@ -146,6 +149,9 @@ function process(input) {
     case 'list':
       processList(input)
       break
+    case 'path':
+      processPath(input)
+      break
     case 'pattern_list':
       processPatternList(input)
       break
@@ -155,6 +161,44 @@ function process(input) {
     default:
       throwNode(input.node)
   }
+}
+
+function processWhileStatement(input) {
+  const condition = []
+  process({ ...input, node: input.node.condition, body: condition })
+
+  const statements = []
+  input.node.statements.forEach(node => {
+    process({ ...input, node, body: statements })
+  })
+
+  input.body.push(`while (${condition.join(' ')}) {`)
+  statements.forEach(line => {
+    input.body.push(`  ${line}`)
+  })
+  input.body.push(`}`)
+}
+
+function processPath(input) {
+  const children = []
+
+  input.node.children.forEach((node, i) => {
+    const child = []
+    children.push(child)
+
+    if (node.type === 'index') {
+      child.push('[')
+      process({ ...input, node: node.expression, body: child })
+      child.push(']')
+    } else {
+      if (i > 0) {
+        child.push('.')
+      }
+      process({ ...input, node, body: child })
+    }
+  })
+
+  input.body.push(`${children.map(x => x.join('')).join('')}`)
 }
 
 function processUnaryOperator(input) {
@@ -198,6 +242,7 @@ function processPatternList(input) {
 function processTuple(input) {
   const values = []
   input.node.values.forEach(node => {
+    if (!node) return
     const value = []
     process({ ...input, body: value, node })
 
@@ -211,11 +256,14 @@ function processTuple(input) {
 
 function processList(input) {
   const items = []
-  input.node.items.forEach(node => {
-    const item = []
-    process({ ...input, body: item, node })
 
-    items.push(item)
+  input.node.items.forEach(node => {
+    if (node) {
+      const item = []
+      process({ ...input, body: item, node })
+
+      items.push(item)
+    }
   })
 
   input.body.push(`[${items.map(item => item.join(' ')).join(', ')}]`)
@@ -410,6 +458,7 @@ function processFunctionDefinition(input) {
   const defaultParams = []
   const defaultParamsType = []
   const ignored = {}
+
   const childInput = { ...input, initialized: { ...input.initialized } }
   input.node.parameters.forEach(node => {
     let type
@@ -493,7 +542,7 @@ function processFunctionDefinition(input) {
   )
 
   Object.keys(childInput.initialized).forEach(key => {
-    if (!ignored[key]) {
+    if (!ignored[key] && !input.initialized[key]) {
       input.body.push(`let ${key}`)
     }
   })

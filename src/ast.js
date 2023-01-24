@@ -178,6 +178,58 @@ function processDictionary(input) {
   return info
 }
 
+function processSet(input) {
+  const info = { type: 'list', items: [] }
+  let i = 0
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case '{':
+      case '}':
+        break
+      case ',':
+        info.items[++i] = undefined
+        break
+      case 'identifier':
+        info.items[i] = {
+          type: 'reference',
+          name: node.text,
+        }
+        break
+      case 'float':
+        info.items[i] = processFloat({ ...input, node })
+        break
+      case 'string':
+        info.items[i] = processString({ ...input, node })
+        break
+      case 'unary_operator':
+        info.items[i] = processUnaryOperator({ ...input, node })
+        break
+      case 'binary_operator':
+        info.items[i] = processBinaryOperator({ ...input, node })
+        break
+      case 'attribute':
+        info.items[i] = processAttribute({ ...input, node })
+        break
+      case 'integer':
+        info.items[i] = processInteger({ ...input, node })
+        break
+      case 'none':
+        info.items[i] = processNone({ ...input, node })
+        break
+      case 'true':
+      case 'false':
+        info.items[i] = {
+          type: 'boolean',
+          value: node.type,
+        }
+        break
+      default:
+        throwNode(node, input.node)
+    }
+  })
+  return info
+}
+
 function processList(input) {
   const info = { type: 'list', items: [] }
   let i = 0
@@ -238,7 +290,7 @@ function processSubscript(input) {
       case ',':
         break
       case '[':
-        index = {}
+        index = { type: 'index' }
         info.children.push(index)
         break
       case ']':
@@ -267,6 +319,9 @@ function processSubscript(input) {
           })
         }
         break
+      case 'integer':
+        index.expression = processInteger({ ...input, node })
+        break
       case 'unary_operator':
         index.expression = processUnaryOperator({ ...input, node })
         break
@@ -284,13 +339,20 @@ function processSubscript(input) {
 }
 
 function processAssignment(input) {
-  const info = { type: 'assignment' }
+  const info = { type: 'assignment', text: input.node.text }
   input.node.children.forEach(node => {
     switch (node.type) {
       case 'identifier':
-        info.left = {
-          type: 'reference',
-          name: node.text,
+        if (info.left) {
+          info.right = {
+            type: 'reference',
+            name: node.text,
+          }
+        } else {
+          info.left = {
+            type: 'reference',
+            name: node.text,
+          }
         }
         break
       case '=':
@@ -305,8 +367,14 @@ function processAssignment(input) {
       case 'pattern_list':
         info.left = processPatternList({ ...input, node })
         break
+      case 'list':
+        info.right = processList({ ...input, node })
+        break
+      case 'set':
+        info.right = processSet({ ...input, node })
+        break
       case 'subscript':
-        if (!input.left) {
+        if (!info.left) {
           info.right = processSubscript({ ...input, node })
         } else {
           info.right = processSubscript({ ...input, node })
@@ -328,18 +396,21 @@ function processAssignment(input) {
         info.right = processComparisonOperator({ ...input, node })
         break
       case 'tuple_pattern':
-        if (!input.left) {
+        if (info.left) {
           info.right = processTuplePattern({ ...input, node })
         } else {
           info.right = processTuplePattern({ ...input, node })
         }
         break
       case 'attribute':
-        if (!input.left) {
-          input.left = processAttribute({ ...input, node })
-        } else {
+        if (info.left) {
           info.right = processAttribute({ ...input, node })
+        } else {
+          info.left = processAttribute({ ...input, node })
         }
+        break
+      case 'integer':
+        info.right = processInteger({ ...input, node })
         break
       case 'call':
         info.right = processCall({ ...input, node })
@@ -349,6 +420,11 @@ function processAssignment(input) {
         break
       case 'conditional_expression':
         info.right = processConditionalExpression({ ...input, node })
+        break
+      case ':':
+        break
+      case 'type':
+        info.leftType = processType({ ...input, node })
         break
       default:
         throwNode(node, input.node)
@@ -501,6 +577,9 @@ function processBinaryOperator(input) {
         break
       case 'subscript':
         sides.push(processSubscript({ ...childInput, node }))
+        break
+      case 'boolean_operator':
+        sides.push(processBinaryOperator({ ...childInput, node }))
         break
       case 'unary_operator':
         sides.push(processUnaryOperator({ ...childInput, node }))
@@ -739,16 +818,29 @@ function processReturnStatement(input) {
           node,
         })
         break
+      case 'tuple':
+        info.statement = processTuplePattern({ ...input, node })
+        break
       case 'binary_operator':
         info.statement = processBinaryOperator({ ...input, node })
         break
       case 'unary_operator':
         info.statement = processUnaryOperator({ ...input, node })
         break
+      case 'subscript':
+        info.statement = processSubscript({ ...input, node })
+        break
       case 'identifier':
         info.statement = {
           type: 'reference',
           name: node.text,
+        }
+        break
+      case 'false':
+      case 'true':
+        info.statement = {
+          type: 'boolean',
+          value: node.type,
         }
         break
       default:
@@ -790,6 +882,9 @@ function processForStatement(input) {
           type: 'reference',
           name: node.text,
         })
+        break
+      case 'call':
+        sides.push(processCall({ ...input, node }))
         break
       case 'block':
         info.body = processBlock({ ...childInput, node })
@@ -834,6 +929,9 @@ function processBlock(input) {
       case 'import_statement':
         // Not yet...
         break
+      case 'while_statement':
+        body.push(processWhileStatement({ ...input, node }))
+        break
       case 'raise_statement':
         body.push(processRaiseStatement({ ...input, node }))
         break
@@ -877,6 +975,9 @@ function processNotOperator(input) {
         break
       case 'attribute':
         info.expression = processAttribute({ ...input, node })
+        break
+      case 'call':
+        info.expression = processCall({ ...input, node })
         break
       case 'identifier':
         info.expression = {
@@ -976,12 +1077,34 @@ function processElifClause(input) {
   return choice
 }
 
+function processWhileStatement(input) {
+  let info = { type: 'while_statement' }
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case 'while':
+      case ':':
+      case 'comment':
+        break
+      case 'call':
+        info.condition = processCall({ ...input, node })
+        break
+      case 'block':
+        info.statements = processBlock({ ...input, node })
+        break
+      default:
+        throwNode(node, input.node)
+    }
+  })
+  return info
+}
+
 function processElseClause(input) {
   let choice = {}
   input.node.children.forEach(node => {
     switch (node.type) {
       case 'else':
       case ':':
+      case 'comment':
         break
       case 'block':
         choice.statements = processBlock({ ...input, node })
@@ -1023,6 +1146,7 @@ function processImportStatement(input) {
 
 function processFunctionDefinition(input) {
   const info = { type: 'function_definition', parameters: [], body: [] }
+  let comingReturnType = false
   input.node.children.forEach(node => {
     switch (node.type) {
       case 'def':
@@ -1035,6 +1159,13 @@ function processFunctionDefinition(input) {
         }
         break
       case ':':
+        break
+      case 'type':
+        comingReturnType = false
+        info.returnType = processType({ ...input, node })
+        break
+      case '->':
+        comingReturnType = true
         break
       case 'parameters':
         info.parameters.push(
@@ -1062,6 +1193,29 @@ function processFunctionDefinition(input) {
     }
   })
   return info
+}
+
+function processType(input) {
+  let expression
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case 'comment':
+      case ':':
+        break
+      case 'identifier':
+        expression = {
+          type: 'reference',
+          name: node.text,
+        }
+        break
+      case 'subscript':
+        expression = processSubscript({ ...input, node })
+        break
+      default:
+        throwNode(node, input.node)
+    }
+  })
+  return expression
 }
 
 function processClassDefinition(input) {
@@ -1276,6 +1430,9 @@ function processListSplat(input) {
           isList: true,
         }
         break
+      case 'call':
+        arg = processCall({ ...input, node })
+        break
       default:
         throwNode(node, input.node)
     }
@@ -1416,6 +1573,9 @@ function processModule(input) {
         processImportStatement(input)
         break
       case 'comment':
+        break
+      case 'if_statement':
+        body.push(processIfStatement({ ...input, node }))
         break
       case 'decorated_definition':
         body.push(processDecoratedDefinition({ ...input, node }))
