@@ -28,7 +28,6 @@ function process(input) {
 }
 
 function processAttribute(input) {
-  const info = { type: 'attribute' }
   let expression
   input.node.children.forEach(node => {
     switch (node.type) {
@@ -94,7 +93,8 @@ function processAttribute(input) {
         throwNode(node, input.node)
     }
   })
-  return info
+
+  return expression
 }
 
 function processPair(input) {
@@ -133,6 +133,7 @@ function processParenthesizedExpression(input) {
     switch (node.type) {
       case '(':
       case ')':
+      case 'comment':
         break
       case 'call':
         info.expression = processCall({ ...input, node })
@@ -293,6 +294,16 @@ function processAssignment(input) {
         }
         break
       case '=':
+      case '*=':
+      case '+=':
+      case '-=':
+      case '/=':
+      case '>>=':
+      case '<<=':
+        info.operator = node.type
+        break
+      case 'pattern_list':
+        info.left = processPatternList({ ...input, node })
         break
       case 'subscript':
         if (!input.left) {
@@ -306,6 +317,9 @@ function processAssignment(input) {
         break
       case 'dictionary':
         input.right = processDictionary({ ...input, node })
+        break
+      case 'parenthesized_expression':
+        input.right = processParenthesizedExpression({ ...input, node })
         break
       case 'binary_operator':
         input.right = processBinaryOperator({ ...input, node })
@@ -671,6 +685,25 @@ function processCall(input) {
   return info
 }
 
+function processPatternList(input) {
+  let info = { type: 'pattern_list', children: [] }
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case ',':
+        break
+      case 'identifier':
+        info.children.push({
+          type: 'reference',
+          name: node.text,
+        })
+        break
+      default:
+        throwNode(node, input.node)
+    }
+  })
+  return info
+}
+
 function processReturnStatement(input) {
   let info = { type: 'return_statement' }
   input.node.children.forEach(node => {
@@ -693,7 +726,10 @@ function processReturnStatement(input) {
         info.statement = processUnaryOperator({ ...input, node })
         break
       case 'identifier':
-        info.statement = processReturnStatement({ ...input, node })
+        info.statement = {
+          type: 'reference',
+          name: node.text,
+        }
         break
       default:
         throwNode(node, input.node)
@@ -841,6 +877,15 @@ function processIfStatement(input) {
     switch (node.type) {
       case 'if':
       case ':':
+      case 'comment':
+        break
+      case 'identifier':
+        choice = {}
+        choice.test = {
+          type: 'reference',
+          name: node.text,
+        }
+        info.choices.push(choice)
         break
       case 'not_operator':
         choice = {}
@@ -857,6 +902,11 @@ function processIfStatement(input) {
         choice.test = processComparisonOperator({ ...input, node })
         info.choices.push(choice)
         break
+      case 'call':
+        choice = {}
+        choice.test = processCall({ ...input, node })
+        info.choices.push(choice)
+        break
       case 'block':
         choice.body = processBlock({ ...input, node })
         break
@@ -864,11 +914,44 @@ function processIfStatement(input) {
         choice = processElseClause({ ...input, node })
         info.choices.push(choice)
         break
+      case 'elif_clause':
+        choice = processElifClause({ ...input, node })
+        info.choices.push(choice)
+        break
       default:
         throwNode(node, input.node)
     }
   })
   return info
+}
+
+function processElifClause(input) {
+  let choice = {}
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case 'elif':
+      case ':':
+        break
+      case 'call':
+        choice.test = processCall({ ...input, node })
+        break
+      case 'not_operator':
+        choice.test = processNotOperator({ ...input, node })
+        break
+      case 'comparison_operator':
+        choice.test = processComparisonOperator({ ...input, node })
+        break
+      case 'boolean_operator':
+        choice.test = processComparisonOperator({ ...input, node })
+        break
+      case 'block':
+        choice.body = processBlock({ ...input, node })
+        break
+      default:
+        throwNode(node, input.node)
+    }
+  })
+  return choice
 }
 
 function processElseClause(input) {
@@ -893,6 +976,7 @@ function processExpressionStatement(input) {
   input.node.children.forEach(node => {
     switch (node.type) {
       case 'assignment':
+      case 'augmented_assignment':
         statement = processAssignment({ ...input, node })
         break
       case 'dictionary':
@@ -923,10 +1007,7 @@ function processFunctionDefinition(input) {
         break
       case 'identifier':
         if (!info.name) {
-          info.name = {
-            type: 'reference',
-            name: node.text,
-          }
+          info.name = node.text
         } else {
           throwNode(node, input.node)
         }
@@ -1033,6 +1114,50 @@ function processDefaultParameter(input) {
     left: sides.shift(),
     right: sides.shift(),
   }
+  return info
+}
+
+function processTypedParameter(input) {
+  let sides = []
+  input.node.children.forEach(node => {
+    switch (node.type) {
+      case ':':
+        break
+      case 'comment':
+        break
+      case 'list_splat_pattern':
+        sides.push(processListSplatPattern({ ...input, node }))
+        break
+      case 'dictionary_splat_pattern':
+        sides.push(processDictionarySplatPattern({ ...input, node }))
+        break
+      case 'keyword_separator':
+        // https://stackoverflow.com/questions/14301967/bare-asterisk-in-function-parameters
+        // don't care about that.
+        break
+      case 'identifier':
+        sides.push({
+          type: 'reference',
+          name: node.text,
+        })
+        break
+      case 'type':
+        sides.push({
+          type: 'reference',
+          name: node.text,
+        })
+        break
+      default:
+        throwNode(node, input.node)
+    }
+  })
+
+  const info = {
+    type: 'typed_parameter',
+    left: sides.shift(),
+    leftType: sides.shift(),
+  }
+
   return info
 }
 
@@ -1210,6 +1335,10 @@ function processParameters(input) {
         // https://stackoverflow.com/questions/14301967/bare-asterisk-in-function-parameters
         // don't care about that.
         break
+      case 'typed_parameter':
+        parameter = processTypedParameter({ ...input, node })
+        parameters.push(parameter)
+        break
       case 'typed_default_parameter':
         parameter = processTypedDefaultParameter({ ...input, node })
         parameters.push(parameter)
@@ -1240,9 +1369,13 @@ function processModule(input) {
         body.push(processExpressionStatement({ ...input, node }))
         break
       case 'import_statement':
+      case 'import_from_statement':
         processImportStatement(input)
         break
       case 'comment':
+        break
+      case 'decorated_definition':
+        body.push(processDecoratedDefinition({ ...input, node }))
         break
       case 'function_definition':
         body.push(processFunctionDefinition({ ...input, node }))

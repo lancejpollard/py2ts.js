@@ -14,3 +14,16 @@ tedious work of changing the high-level syntax.
 So this library is like an aid to your process of porting code from
 Python to TypeScript, not a perfect translator. It just saves you some
 time and avoids some tediousness.
+
+## Development
+
+This is not yet a fully complete project. You can test it out on a
+snippet of python, and if you get an error, it might look like this:
+
+```
+Error: Unhandled node type 'import_from_statement' in context 'module'
+```
+
+If so, just go and add an `import_from_statement` handler (in the switch
+statement) in the `module` handler. It's pretty basic, check out the
+source code!

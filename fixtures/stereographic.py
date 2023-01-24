@@ -1,191 +1,343 @@
+# https://github.com/geoopt/geoopt/blob/master/geoopt/manifolds/stereographic/math.py
+r"""
+:math:`\kappa`-Stereographic math module.
+
+The functions for the mathematics in gyrovector spaces are taken from the
+following resources:
+
+    [1] Ganea, Octavian, Gary Bécigneul, and Thomas Hofmann. "Hyperbolic
+           neural networks." Advances in neural information processing systems.
+           2018.
+    [2] Bachmann, Gregor, Gary Bécigneul, and Octavian-Eugen Ganea. "Constant
+           Curvature Graph Convolutional Networks." arXiv preprint
+           arXiv:1911.05076 (2019).
+    [3] Skopek, Ondrej, Octavian-Eugen Ganea, and Gary Bécigneul.
+           "Mixed-curvature Variational Autoencoders." arXiv preprint
+           arXiv:1911.08411 (2019).
+    [4] Ungar, Abraham A. Analytic hyperbolic geometry: Mathematical
+           foundations and applications. World Scientific, 2005.
+    [5] Albert, Ungar Abraham. Barycentric calculus in Euclidean and
+           hyperbolic geometry: A comparative introduction. World Scientific,
+           2010.
+"""
+
 import functools
 import torch.jit
+from typing import List, Optional
+from ...utils import list_range, drop_dims, sign, clamp_abs, sabs
 
 
-# NUMERICAL PRECISION ##########################################################
-
-
-# Clamping safety
-# TODO: make this datatype dependent
-MIN_NORM = 1e-15
-# Ball epsilon safety border
-BALL_EPS = {torch.float32: 4e-3, torch.float64: 1e-5}
-
-
-# TRIGONOMETRIC FUNCTIONS ######################################################
-
-
+@torch.jit.script
 def tanh(x):
     return x.clamp(-15, 15).tanh()
 
 
-class Artanh(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        x = x.clamp(-1 + 1e-15, 1 - 1e-15)
-        ctx.save_for_backward(x)
-        dtype = x.dtype
-        x = x.double()
-        res = (torch.log_(1 + x).sub_(torch.log_(1 - x))).mul_(0.5)
-        return res.to(dtype)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        (input,) = ctx.saved_tensors
-        return grad_output / (1 - input ** 2)
+@torch.jit.script
+def artanh(x: torch.Tensor):
+    x = x.clamp(-1 + 1e-7, 1 - 1e-7)
+    return (torch.log(1 + x).sub(torch.log(1 - x))).mul(0.5)
 
 
-class Arsinh(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, x):
-        ctx.save_for_backward(x)
-        z = x.double()
-        res = z + torch.sqrt_(1 + z.pow(2))
-        return (res).clamp_min_(MIN_NORM).log_().to(x.dtype)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        (input,) = ctx.saved_tensors
-        return grad_output / (1 + input ** 2) ** 0.5
+@torch.jit.script
+def arsinh(x: torch.Tensor):
+    return (x + torch.sqrt(1 + x.pow(2))).clamp_min(1e-15).log().to(x.dtype)
 
 
-def artanh(x):
-    return Artanh.apply(x)
+@torch.jit.script
+def abs_zero_grad(x):
+    # this op has derivative equal to 1 at zero
+    return x * sign(x)
 
 
-def arsinh(x):
-    return Arsinh.apply(x)
-
-
-# CURVATURE-PARAMETRIZED TRIGONOMETRIC FUNCTIONS ###############################
-
-
-"""
-The following functions select the appropriate trigonometric function (normal or
-hyperbolic) depending on the value of the curvature :math:`\kappa`.
-"""
-
-def tan_K(x, K):
-    if K <= 0:
-        sqrt_minus_K = torch.sqrt(-K)
-        return (1.0/sqrt_minus_K) * tanh(sqrt_minus_K * x)
+@torch.jit.script
+def tan_k_zero_taylor(x: torch.Tensor, k: torch.Tensor, order: int = -1):
+    if order == 0:
+        return x
+    k = abs_zero_grad(k)
+    if order == -1 or order == 5:
+        return (
+            x
+            + 1 / 3 * k * x**3
+            + 2 / 15 * k**2 * x**5
+            + 17 / 315 * k**3 * x**7
+            + 62 / 2835 * k**4 * x**9
+            + 1382 / 155925 * k**5 * x**11
+            # + o(k**6)
+        )
+    elif order == 1:
+        return x + 1 / 3 * k * x**3
+    elif order == 2:
+        return x + 1 / 3 * k * x**3 + 2 / 15 * k**2 * x**5
+    elif order == 3:
+        return (
+            x
+            + 1 / 3 * k * x**3
+            + 2 / 15 * k**2 * x**5
+            + 17 / 315 * k**3 * x**7
+        )
+    elif order == 4:
+        return (
+            x
+            + 1 / 3 * k * x**3
+            + 2 / 15 * k**2 * x**5
+            + 17 / 315 * k**3 * x**7
+            + 62 / 2835 * k**4 * x**9
+        )
     else:
-        sqrt_K = torch.sqrt(K)
-        return (1.0/sqrt_K) * torch.tan(sqrt_K * x)
+        raise RuntimeError("order not in [-1, 5]")
 
 
-def arctan_K(x, K):
-    if K <= 0:
-        sqrt_minus_K = torch.sqrt(-K)
-        return (1.0/sqrt_minus_K) * artanh(sqrt_minus_K * x)
+@torch.jit.script
+def artan_k_zero_taylor(x: torch.Tensor, k: torch.Tensor, order: int = -1):
+    if order == 0:
+        return x
+    k = abs_zero_grad(k)
+    if order == -1 or order == 5:
+        return (
+            x
+            - 1 / 3 * k * x**3
+            + 1 / 5 * k**2 * x**5
+            - 1 / 7 * k**3 * x**7
+            + 1 / 9 * k**4 * x**9
+            - 1 / 11 * k**5 * x**11
+            # + o(k**6)
+        )
+    elif order == 1:
+        return x - 1 / 3 * k * x**3
+    elif order == 2:
+        return x - 1 / 3 * k * x**3 + 1 / 5 * k**2 * x**5
+    elif order == 3:
+        return (
+            x - 1 / 3 * k * x**3 + 1 / 5 * k**2 * x**5 - 1 / 7 * k**3 * x**7
+        )
+    elif order == 4:
+        return (
+            x
+            - 1 / 3 * k * x**3
+            + 1 / 5 * k**2 * x**5
+            - 1 / 7 * k**3 * x**7
+            + 1 / 9 * k**4 * x**9
+        )
     else:
-        sqrt_K = torch.sqrt(K)
-        return (1.0/sqrt_K) * torch.atan(sqrt_K * x)
+        raise RuntimeError("order not in [-1, 5]")
 
 
-def arcsin_K(x, K):
-    if K <= 0:
-        sqrt_minus_K = torch.sqrt(-K)
-        return (1.0/sqrt_minus_K) * arsinh(sqrt_minus_K * x)
+@torch.jit.script
+def arsin_k_zero_taylor(x: torch.Tensor, k: torch.Tensor, order: int = -1):
+    if order == 0:
+        return x
+    k = abs_zero_grad(k)
+    if order == -1 or order == 5:
+        return (
+            x
+            + k * x**3 / 6
+            + 3 / 40 * k**2 * x**5
+            + 5 / 112 * k**3 * x**7
+            + 35 / 1152 * k**4 * x**9
+            + 63 / 2816 * k**5 * x**11
+            # + o(k**6)
+        )
+    elif order == 1:
+        return x + k * x**3 / 6
+    elif order == 2:
+        return x + k * x**3 / 6 + 3 / 40 * k**2 * x**5
+    elif order == 3:
+        return x + k * x**3 / 6 + 3 / 40 * k**2 * x**5 + 5 / 112 * k**3 * x**7
+    elif order == 4:
+        return (
+            x
+            + k * x**3 / 6
+            + 3 / 40 * k**2 * x**5
+            + 5 / 112 * k**3 * x**7
+            + 35 / 1152 * k**4 * x**9
+        )
     else:
-        sqrt_K = torch.sqrt(K)
-        return (1.0/sqrt_K) * torch.asin(sqrt_K * x)
+        raise RuntimeError("order not in [-1, 5]")
 
 
-# GYROVECTOR SPACE MATH ########################################################
+@torch.jit.script
+def sin_k_zero_taylor(x: torch.Tensor, k: torch.Tensor, order: int = -1):
+    if order == 0:
+        return x
+    k = abs_zero_grad(k)
+    if order == -1 or order == 5:
+        return (
+            x
+            - k * x**3 / 6
+            + k**2 * x**5 / 120
+            - k**3 * x**7 / 5040
+            + k**4 * x**9 / 362880
+            - k**5 * x**11 / 39916800
+            # + o(k**6)
+        )
+    elif order == 1:
+        return x - k * x**3 / 6
+    elif order == 2:
+        return x - k * x**3 / 6 + k**2 * x**5 / 120
+    elif order == 3:
+        return x - k * x**3 / 6 + k**2 * x**5 / 120 - k**3 * x**7 / 5040
+    elif order == 4:
+        return (
+            x
+            - k * x**3 / 6
+            + k**2 * x**5 / 120
+            - k**3 * x**7 / 5040
+            + k**4 * x**9 / 362880
+        )
+    else:
+        raise RuntimeError("order not in [-1, 5]")
 
 
-def project(x, *, K=1.0, dim=-1, eps=None):
+@torch.jit.script
+def tan_k(x: torch.Tensor, k: torch.Tensor):
+    k_sign = k.sign()
+    zero = torch.zeros((), device=k.device, dtype=k.dtype)
+    k_zero = k.isclose(zero)
+    # shrink sign
+    k_sign = torch.masked_fill(k_sign, k_zero, zero.to(k_sign.dtype))
+    if torch.all(k_zero):
+        return tan_k_zero_taylor(x, k, order=1)
+    k_sqrt = sabs(k).sqrt()
+    scaled_x = x * k_sqrt
+
+    if torch.all(k_sign.lt(0)):
+        return k_sqrt.reciprocal() * tanh(scaled_x)
+    elif torch.all(k_sign.gt(0)):
+        return k_sqrt.reciprocal() * scaled_x.clamp_max(1e38).tan()
+    else:
+        tan_k_nonzero = (
+            torch.where(k_sign.gt(0), scaled_x.clamp_max(1e38).tan(), tanh(scaled_x))
+            * k_sqrt.reciprocal()
+        )
+        return torch.where(k_zero, tan_k_zero_taylor(x, k, order=1), tan_k_nonzero)
+
+
+@torch.jit.script
+def artan_k(x: torch.Tensor, k: torch.Tensor):
+    k_sign = k.sign()
+    zero = torch.zeros((), device=k.device, dtype=k.dtype)
+    k_zero = k.isclose(zero)
+    # shrink sign
+    k_sign = torch.masked_fill(k_sign, k_zero, zero.to(k_sign.dtype))
+    if torch.all(k_zero):
+        return artan_k_zero_taylor(x, k, order=1)
+    k_sqrt = sabs(k).sqrt()
+    scaled_x = x * k_sqrt
+
+    if torch.all(k_sign.lt(0)):
+        return k_sqrt.reciprocal() * artanh(scaled_x)
+    elif torch.all(k_sign.gt(0)):
+        return k_sqrt.reciprocal() * scaled_x.atan()
+    else:
+        artan_k_nonzero = (
+            torch.where(k_sign.gt(0), scaled_x.atan(), artanh(scaled_x))
+            * k_sqrt.reciprocal()
+        )
+        return torch.where(k_zero, artan_k_zero_taylor(x, k, order=1), artan_k_nonzero)
+
+
+@torch.jit.script
+def arsin_k(x: torch.Tensor, k: torch.Tensor):
+    k_sign = k.sign()
+    zero = torch.zeros((), device=k.device, dtype=k.dtype)
+    k_zero = k.isclose(zero)
+    # shrink sign
+    k_sign = torch.masked_fill(k_sign, k_zero, zero.to(k_sign.dtype))
+    if torch.all(k_zero):
+        return arsin_k_zero_taylor(x, k)
+    k_sqrt = sabs(k).sqrt()
+    scaled_x = x * k_sqrt
+
+    if torch.all(k_sign.lt(0)):
+        return k_sqrt.reciprocal() * arsinh(scaled_x)
+    elif torch.all(k_sign.gt(0)):
+        return k_sqrt.reciprocal() * scaled_x.asin()
+    else:
+        arsin_k_nonzero = (
+            torch.where(
+                k_sign.gt(0),
+                scaled_x.clamp(-1 + 1e-7, 1 - 1e-7).asin(),
+                arsinh(scaled_x),
+            )
+            * k_sqrt.reciprocal()
+        )
+        return torch.where(k_zero, arsin_k_zero_taylor(x, k, order=1), arsin_k_nonzero)
+
+
+@torch.jit.script
+def sin_k(x: torch.Tensor, k: torch.Tensor):
+    k_sign = k.sign()
+    zero = torch.zeros((), device=k.device, dtype=k.dtype)
+    k_zero = k.isclose(zero)
+    # shrink sign
+    k_sign = torch.masked_fill(k_sign, k_zero, zero.to(k_sign.dtype))
+    if torch.all(k_zero):
+        return sin_k_zero_taylor(x, k)
+    k_sqrt = sabs(k).sqrt()
+    scaled_x = x * k_sqrt
+
+    if torch.all(k_sign.lt(0)):
+        return k_sqrt.reciprocal() * torch.sinh(scaled_x)
+    elif torch.all(k_sign.gt(0)):
+        return k_sqrt.reciprocal() * scaled_x.sin()
+    else:
+        sin_k_nonzero = (
+            torch.where(k_sign.gt(0), scaled_x.sin(), torch.sinh(scaled_x))
+            * k_sqrt.reciprocal()
+        )
+        return torch.where(k_zero, sin_k_zero_taylor(x, k, order=1), sin_k_nonzero)
+
+
+def project(x: torch.Tensor, *, k: torch.Tensor, dim=-1, eps=-1):
     r"""
-    Safe projects :math:`x` into the manifold for numerical stability. Only has
-    an effect for the Poincaré ball, not for the stereographic projection of the
-    sphere.
+    Safe projection on the manifold for numerical stability.
 
     Parameters
     ----------
     x : tensor
-        point on the manifold
-    K : float|tensor
+        point on the Poincare ball
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension to compute norm
     eps : float
         stability parameter, uses default for dtype if not provided
-        (see BALL_EPS above)
 
     Returns
     -------
     tensor
         projected vector on the manifold
     """
-    return _project(x, K, dim, eps)
+    return _project(x, k, dim, eps)
 
 
-def _project(x, K, dim: int = -1, eps: float = None):
-    K_smaller_zero = K < 0
-    num_smaller_zero = K_smaller_zero.sum()
-    # this check is done to improve performance
-    # (no projections or norm-checks if K >= 0)
-    if num_smaller_zero > 0:
-        norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(MIN_NORM)
-        if eps is None:
-            eps = BALL_EPS[x.dtype]
-        maxnorm = (1 - eps) / (K.abs().sqrt())
-        cond = (norm > maxnorm) * K_smaller_zero
-        projected = (x / norm) * maxnorm
-        return torch.where(cond, projected, x)
-    else:
-        return x
+@torch.jit.script
+def _project(x, k, dim: int = -1, eps: float = -1.0):
+    if eps < 0:
+        if x.dtype == torch.float32:
+            eps = 4e-3
+        else:
+            eps = 1e-5
+    maxnorm = (1 - eps) / (sabs(k) ** 0.5)
+    maxnorm = torch.where(k.lt(0), maxnorm, k.new_full((), 1e15))
+    norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(1e-15)
+    cond = norm > maxnorm
+    projected = x / norm * maxnorm
+    return torch.where(cond, projected, x)
 
 
-def gamma_x(x, *, K=1.0, keepdim=False, dim=-1):
+def lambda_x(x: torch.Tensor, *, k: torch.Tensor, keepdim=False, dim=-1):
     r"""
-    Computes the Lorentz factor :math:`\gamma^\kappa_x` at the point
-    :math:`x` on the manifold.
+    Compute the conformal factor :math:`\lambda^\kappa_x` for a point on the ball.
 
     .. math::
-
-        \lambda^\kappa_x = \frac{1}{1 + \kappa \|x\|_2^2}
+        \lambda^\kappa_x = \frac{2}{1 + \kappa \|x\|_2^2}
 
     Parameters
     ----------
     x : tensor
-        point on the manifold
-    K : float|tensor
-        sectional curvature of manifold
-    keepdim : bool
-        retain the last dim? (default: false)
-    dim : int
-        reduction dimension
-
-    Returns
-    -------
-    tensor
-        Lorentz factor
-    """
-    return _gamma_x(x, K, keepdim=keepdim, dim=dim)
-
-
-def _gamma_x(x, K, keepdim: bool = False, dim: int = -1):
-    x_norm = x.pow(2).sum(dim=dim, keepdim=keepdim)
-    gam = 1.0/(torch.sqrt(1.0+K*x_norm).clamp_min(MIN_NORM))
-    return gam
-
-
-def lambda_x(x, *, K=1.0, keepdim=False, dim=-1):
-    r"""
-    Computes the conformal factor :math:`\lambda^\kappa_x` at the point
-    :math:`x` on the manifold.
-
-    .. math::
-
-        \lambda^\kappa_x = \frac{1}{1 + \kappa \|x\|_2^2}
-
-    Parameters
-    ----------
-    x : tensor
-        point on the manifold
-    K : float|tensor
+        point on the Poincare ball
+    k : tensor
         sectional curvature of manifold
     keepdim : bool
         retain the last dim? (default: false)
@@ -197,18 +349,19 @@ def lambda_x(x, *, K=1.0, keepdim=False, dim=-1):
     tensor
         conformal factor
     """
-    return _lambda_x(x, K, keepdim=keepdim, dim=dim)
+    return _lambda_x(x, k, keepdim=keepdim, dim=dim)
 
 
-def _lambda_x(x, K, keepdim: bool = False, dim: int = -1):
-    lam = 2.0/(1.0+K*x.pow(2).sum(dim=dim, keepdim=keepdim)).clamp_min(MIN_NORM)
-    return lam
+@torch.jit.script
+def _lambda_x(x: torch.Tensor, k: torch.Tensor, keepdim: bool = False, dim: int = -1):
+    return 2 / (1 + k * x.pow(2).sum(dim=dim, keepdim=keepdim)).clamp_min(1e-15)
 
 
-def inner(x, u, v, *, K=1.0, keepdim=False, dim=-1):
+def inner(
+    x: torch.Tensor, u: torch.Tensor, v: torch.Tensor, *, k, keepdim=False, dim=-1
+):
     r"""
-    Computes the inner product for two vectors :math:`u,v` in the tangent space
-    of :math:`x` w.r.t the Riemannian metric of the manifold.
+    Compute inner product for two vectors on the tangent space w.r.t Riemannian metric on the Poincare ball.
 
     .. math::
 
@@ -217,12 +370,12 @@ def inner(x, u, v, *, K=1.0, keepdim=False, dim=-1):
     Parameters
     ----------
     x : tensor
-        point on the manifold
+        point on the Poincare ball
     u : tensor
-        tangent vector to :math:`x` on manifold
+        tangent vector to :math:`x` on Poincare ball
     v : tensor
-        tangent vector to :math:`x` on manifold
-    K : float|tensor
+        tangent vector to :math:`x` on Poincare ball
+    k : tensor
         sectional curvature of manifold
     keepdim : bool
         retain the last dim? (default: false)
@@ -234,19 +387,26 @@ def inner(x, u, v, *, K=1.0, keepdim=False, dim=-1):
     tensor
         inner product
     """
-    inner_prod = _inner(x, u, v, K, keepdim=keepdim, dim=dim)
-    return inner_prod
+    return _inner(x, u, v, k, keepdim=keepdim, dim=dim)
 
 
-def _inner(x, u, v, K, keepdim: bool = False, dim: int = -1):
-    return _lambda_x(x, K, keepdim=True, dim=dim) ** 2 * \
-           (u * v).sum(dim=dim, keepdim=keepdim)
+@torch.jit.script
+def _inner(
+    x: torch.Tensor,
+    u: torch.Tensor,
+    v: torch.Tensor,
+    k: torch.Tensor,
+    keepdim: bool = False,
+    dim: int = -1,
+):
+    return _lambda_x(x, k, keepdim=True, dim=dim) ** 2 * (u * v).sum(
+        dim=dim, keepdim=keepdim
+    )
 
 
-def norm(x, u, *, K=1.0, keepdim=False, dim=-1):
+def norm(x: torch.Tensor, u: torch.Tensor, *, k: torch.Tensor, keepdim=False, dim=-1):
     r"""
-    Computes the norm of a vectors :math:`u` in the tangent space of :math:`x`
-    w.r.t the Riemannian metric of the manifold.
+    Compute vector norm on the tangent space w.r.t Riemannian metric on the Poincare ball.
 
     .. math::
 
@@ -255,10 +415,10 @@ def norm(x, u, *, K=1.0, keepdim=False, dim=-1):
     Parameters
     ----------
     x : tensor
-        point on the manifold
+        point on the Poincare ball
     u : tensor
-        tangent vector to :math:`x` on manifold
-    K : float|tensor
+        tangent vector to :math:`x` on Poincare ball
+    k : tensor
         sectional curvature of manifold
     keepdim : bool
         retain the last dim? (default: false)
@@ -270,18 +430,25 @@ def norm(x, u, *, K=1.0, keepdim=False, dim=-1):
     tensor
         norm of vector
     """
-    return _norm(x, u, K, keepdim=keepdim, dim=dim)
+    return _norm(x, u, k, keepdim=keepdim, dim=dim)
 
 
-def _norm(x, u, K, keepdim: bool = False, dim: int = -1):
-    lam = _lambda_x(x, K, keepdim=keepdim, dim=dim)
-    u_norm = u.norm(dim=dim, keepdim=keepdim, p=2)
-    return lam * u_norm
+@torch.jit.script
+def _norm(
+    x: torch.Tensor,
+    u: torch.Tensor,
+    k: torch.Tensor,
+    keepdim: bool = False,
+    dim: int = -1,
+):
+    return _lambda_x(x, k, keepdim=keepdim, dim=dim) * u.norm(
+        dim=dim, keepdim=keepdim, p=2
+    )
 
 
-def mobius_add(x, y, *, K=1.0, dim=-1):
+def mobius_add(x: torch.Tensor, y: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the Möbius gyrovector addition.
+    Compute the Möbius gyrovector addition.
 
     .. math::
 
@@ -293,7 +460,7 @@ def mobius_add(x, y, *, K=1.0, dim=-1):
             1 - 2 \kappa \langle x, y\rangle + \kappa^2 \|x\|^2_2 \|y\|^2_2
         }
 
-    .. plot:: plots/extended/universal/mobius_add.py
+    .. plot:: plots/extended/stereographic/mobius_add.py
 
     In general this operation is not commutative:
 
@@ -327,7 +494,7 @@ def mobius_add(x, y, *, K=1.0, dim=-1):
         point on the manifold
     y : tensor
         point on the manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -337,15 +504,16 @@ def mobius_add(x, y, *, K=1.0, dim=-1):
     tensor
         the result of the Möbius addition
     """
-    return _mobius_add(x, y, K, dim=dim)
+    return _mobius_add(x, y, k, dim=dim)
 
 
-def _mobius_add(x, y, K, dim=-1):
+@torch.jit.script
+def _mobius_add(x: torch.Tensor, y: torch.Tensor, k: torch.Tensor, dim: int = -1):
     x2 = x.pow(2).sum(dim=dim, keepdim=True)
     y2 = y.pow(2).sum(dim=dim, keepdim=True)
     xy = (x * y).sum(dim=dim, keepdim=True)
-    num = (1 - 2 * K * xy - K * y2) * x + (1 + K * x2) * y
-    denom = 1 - 2 * K * xy + K ** 2 * x2 * y2
+    num = (1 - 2 * k * xy - k * y2) * x + (1 + k * x2) * y
+    denom = 1 - 2 * k * xy + k**2 * x2 * y2
     # minimize denom (omit K to simplify th notation)
     # 1)
     # {d(denom)/d(x) = 2 y + 2x * <y, y> = 0
@@ -358,12 +526,12 @@ def _mobius_add(x, y, K, dim=-1):
     # {- x/<x, x> = y
     # 4)
     # minimum = 1 - 2 <y, y>/<y, y> + <y, y>/<y, y> = 0
-    return num / denom.clamp_min(MIN_NORM)
+    return num / denom.clamp_min(1e-15)
 
 
-def mobius_sub(x, y, *, K=1.0, dim=-1):
+def mobius_sub(x: torch.Tensor, y: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the Möbius gyrovector subtraction.
+    Compute the Möbius gyrovector subtraction.
 
     The Möbius subtraction can be represented via the Möbius addition as
     follows:
@@ -378,7 +546,7 @@ def mobius_sub(x, y, *, K=1.0, dim=-1):
         point on manifold
     y : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -388,16 +556,102 @@ def mobius_sub(x, y, *, K=1.0, dim=-1):
     tensor
         the result of the Möbius subtraction
     """
-    return _mobius_sub(x, y, K, dim=dim)
+    return _mobius_sub(x, y, k, dim=dim)
 
 
-def _mobius_sub(x, y, K, dim: int = -1):
-    return _mobius_add(x, -y, K, dim=dim)
+def _mobius_sub(x: torch.Tensor, y: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    return _mobius_add(x, -y, k, dim=dim)
 
 
-def mobius_coadd(x, y, *, K=1.0, dim=-1):
+def gyration(
+    a: torch.Tensor, b: torch.Tensor, u: torch.Tensor, *, k: torch.Tensor, dim=-1
+):
     r"""
-    Computes the Möbius gyrovector coaddition.
+    Compute the gyration of :math:`u` by :math:`[a,b]`.
+
+    The gyration is a special operation of gyrovector spaces. The gyrovector
+    space addition operation :math:`\oplus_\kappa` is not associative (as
+    mentioned in :func:`mobius_add`), but it is gyroassociative, which means
+
+    .. math::
+
+        u \oplus_\kappa (v \oplus_\kappa w)
+        =
+        (u\oplus_\kappa v) \oplus_\kappa \operatorname{gyr}[u, v]w,
+
+    where
+
+    .. math::
+
+        \operatorname{gyr}[u, v]w
+        =
+        \ominus (u \oplus_\kappa v) \oplus (u \oplus_\kappa (v \oplus_\kappa w))
+
+    We can simplify this equation using the explicit formula for the Möbius
+    addition [1]. Recall,
+
+    .. math::
+
+        A = - \kappa^2 \langle u, w\rangle \langle v, v\rangle
+            - \kappa \langle v, w\rangle
+            + 2 \kappa^2 \langle u, v\rangle \langle v, w\rangle\\
+        B = - \kappa^2 \langle v, w\rangle \langle u, u\rangle
+            + \kappa \langle u, w\rangle\\
+        D = 1 - 2 \kappa \langle u, v\rangle
+            + \kappa^2 \langle u, u\rangle \langle v, v\rangle\\
+
+        \operatorname{gyr}[u, v]w = w + 2 \frac{A u + B v}{D}.
+
+    Parameters
+    ----------
+    a : tensor
+        first point on manifold
+    b : tensor
+        second point on manifold
+    u : tensor
+        vector field for operation
+    k : tensor
+        sectional curvature of manifold
+    dim : int
+        reduction dimension for operations
+
+    Returns
+    -------
+    tensor
+        the result of automorphism
+
+    References
+    ----------
+    [1]  A. A. Ungar (2009), A Gyrovector Space Approach to Hyperbolic Geometry
+    """
+    return _gyration(a, b, u, k, dim=dim)
+
+
+@torch.jit.script
+def _gyration(
+    u: torch.Tensor, v: torch.Tensor, w: torch.Tensor, k: torch.Tensor, dim: int = -1
+):
+    # non-simplified
+    # mupv = -_mobius_add(u, v, K)
+    # vpw = _mobius_add(u, w, K)
+    # upvpw = _mobius_add(u, vpw, K)
+    # return _mobius_add(mupv, upvpw, K)
+    # simplified
+    u2 = u.pow(2).sum(dim=dim, keepdim=True)
+    v2 = v.pow(2).sum(dim=dim, keepdim=True)
+    uv = (u * v).sum(dim=dim, keepdim=True)
+    uw = (u * w).sum(dim=dim, keepdim=True)
+    vw = (v * w).sum(dim=dim, keepdim=True)
+    K2 = k**2
+    a = -K2 * uw * v2 - k * vw + 2 * K2 * uv * vw
+    b = -K2 * vw * u2 + k * uw
+    d = 1 - 2 * k * uv + K2 * u2 * v2
+    return w + 2 * (a * u + b * v) / d.clamp_min(1e-15)
+
+
+def mobius_coadd(x: torch.Tensor, y: torch.Tensor, *, k: torch.Tensor, dim=-1):
+    r"""
+    Compute the Möbius gyrovector coaddition.
 
     The addition operation :math:`\oplus_\kappa` is neither associative, nor
     commutative. In contrast, the coaddition :math:`\boxplus_\kappa` (or
@@ -432,7 +686,7 @@ def mobius_coadd(x, y, *, K=1.0, dim=-1):
         point on manifold
     y : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -443,22 +697,25 @@ def mobius_coadd(x, y, *, K=1.0, dim=-1):
         the result of the Möbius coaddition
 
     """
-    return _mobius_coadd(x, y, K, dim=dim)
+    return _mobius_coadd(x, y, k, dim=dim)
+
 
 # TODO: check numerical stability with Gregor's paper!!!
-def _mobius_coadd(x, y, K, dim: int = -1):
-    #x2 = x.pow(2).sum(dim=dim, keepdim=True)
-    #y2 = y.pow(2).sum(dim=dim, keepdim=True)
-    #num = (1 + K * y2) * x + (1 + K * x2) * y
-    #denom = 1 - K ** 2 * x2 * y2
-    ## avoid division by zero in this way
-    #return num / denom.clamp_min(MIN_NORM)
-    return _mobius_add(x, _gyration(x, -y, y, K=K, dim=dim), K, dim=dim)
+@torch.jit.script
+def _mobius_coadd(x: torch.Tensor, y: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    # x2 = x.pow(2).sum(dim=dim, keepdim=True)
+    # y2 = y.pow(2).sum(dim=dim, keepdim=True)
+    # num = (1 + K * y2) * x + (1 + K * x2) * y
+    # denom = 1 - K ** 2 * x2 * y2
+    # avoid division by zero in this way
+    # return num / denom.clamp_min(1e-15)
+    #
+    return _mobius_add(x, _gyration(x, -y, y, k=k, dim=dim), k, dim=dim)
 
 
-def mobius_cosub(x, y, *, K=1.0, dim=-1):
+def mobius_cosub(x: torch.Tensor, y: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the Möbius gyrovector cosubtraction.
+    Compute the Möbius gyrovector cosubtraction.
 
     The Möbius cosubtraction is defined as follows:
 
@@ -472,7 +729,7 @@ def mobius_cosub(x, y, *, K=1.0, dim=-1):
         point on manifold
     y : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -483,11 +740,13 @@ def mobius_cosub(x, y, *, K=1.0, dim=-1):
         the result of the Möbius cosubtraction
 
     """
-    return _mobius_cosub(x, y, K, dim=dim)
+    return _mobius_cosub(x, y, k, dim=dim)
 
 
-def _mobius_cosub(x, y, K, dim: int = -1):
-    return _mobius_coadd(x, -y, K, dim=dim)
+@torch.jit.script
+def _mobius_cosub(x: torch.Tensor, y: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    return _mobius_coadd(x, -y, k, dim=dim)
+
 
 # TODO: can we make this operation somehow safer by breaking up the
 # TODO: scalar multiplication for K>0 when the argument to the
@@ -495,9 +754,9 @@ def _mobius_cosub(x, y, K, dim: int = -1):
 # TODO: one could use the scalar associative law
 # TODO: s_1 (X) s_2 (X) x = (s_1*s_2) (X) x
 # TODO: to implement a more stable Möbius scalar mult
-def mobius_scalar_mul(r, x, *, K=1.0, dim=-1):
+def mobius_scalar_mul(r: torch.Tensor, x: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the Möbius scalar multiplication.
+    Compute the Möbius scalar multiplication.
 
     .. math::
 
@@ -542,11 +801,11 @@ def mobius_scalar_mul(r, x, *, K=1.0, dim=-1):
 
     Parameters
     ----------
-    r : float|tensor
+    r : tensor
         scalar for multiplication
     x : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -556,25 +815,27 @@ def mobius_scalar_mul(r, x, *, K=1.0, dim=-1):
     tensor
         the result of the Möbius scalar multiplication
     """
-    return _mobius_scalar_mul(r, x, K, dim=dim)
+    return _mobius_scalar_mul(r, x, k, dim=dim)
 
 
-def _mobius_scalar_mul(r, x, K, dim: int = -1):
-    x_norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(MIN_NORM)
-    res_c = tan_K(r * arctan_K(x_norm, K), K) * (x / x_norm)
+@torch.jit.script
+def _mobius_scalar_mul(
+    r: torch.Tensor, x: torch.Tensor, k: torch.Tensor, dim: int = -1
+):
+    x_norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(1e-15)
+    res_c = tan_k(r * artan_k(x_norm, k), k) * (x / x_norm)
     return res_c
 
 
-def dist(x, y, *, K=1.0, keepdim=False, dim=-1):
+def dist(x: torch.Tensor, y: torch.Tensor, *, k: torch.Tensor, keepdim=False, dim=-1):
     r"""
-    Computes the geodesic distance between :math:`x` and :math:`y` on the
-    manifold.
+    Compute the geodesic distance between :math:`x` and :math:`y` on the manifold.
 
     .. math::
 
         d_\kappa(x, y) = 2\tan_\kappa^{-1}(\|(-x)\oplus_\kappa y\|_2)
 
-    .. plot:: plots/extended/universal/distance.py
+    .. plot:: plots/extended/stereographic/distance.py
 
     Parameters
     ----------
@@ -582,7 +843,7 @@ def dist(x, y, *, K=1.0, keepdim=False, dim=-1):
         point on manifold
     y : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     keepdim : bool
         retain the last dim? (default: false)
@@ -594,24 +855,31 @@ def dist(x, y, *, K=1.0, keepdim=False, dim=-1):
     tensor
         geodesic distance between :math:`x` and :math:`y`
     """
-    return _dist(x, y, K, keepdim=keepdim, dim=dim)
+    return _dist(x, y, k, keepdim=keepdim, dim=dim)
 
 
-def _dist(x, y, K, keepdim: bool = False, dim: int = -1):
-    return 2.0 * arctan_K(
-        _mobius_add(-x, y, K, dim=dim).norm(dim=dim, p=2, keepdim=keepdim), K
+@torch.jit.script
+def _dist(
+    x: torch.Tensor,
+    y: torch.Tensor,
+    k: torch.Tensor,
+    keepdim: bool = False,
+    dim: int = -1,
+):
+    return 2.0 * artan_k(
+        _mobius_add(-x, y, k, dim=dim).norm(dim=dim, p=2, keepdim=keepdim), k
     )
 
 
-def dist0(x, *, K=1.0, keepdim=False, dim=-1):
+def dist0(x: torch.Tensor, *, k: torch.Tensor, keepdim=False, dim=-1):
     r"""
-    Computes geodesic distance to the manifold's origin.
+    Compute geodesic distance to the manifold's origin.
 
     Parameters
     ----------
     x : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     keepdim : bool
         retain the last dim? (default: false)
@@ -623,17 +891,19 @@ def dist0(x, *, K=1.0, keepdim=False, dim=-1):
     tensor
         geodesic distance between :math:`x` and :math:`0`
     """
-    return _dist0(x, K, keepdim=keepdim, dim=dim)
+    return _dist0(x, k, keepdim=keepdim, dim=dim)
 
 
-def _dist0(x, K, keepdim: bool = False, dim: int = -1):
-    return 2.0 * arctan_K(x.norm(dim=dim, p=2, keepdim=keepdim), K)
+@torch.jit.script
+def _dist0(x: torch.Tensor, k: torch.Tensor, keepdim: bool = False, dim: int = -1):
+    return 2.0 * artan_k(x.norm(dim=dim, p=2, keepdim=keepdim), k)
 
 
-def geodesic(t, x, y, *, K=1.0, dim=-1):
+def geodesic(
+    t: torch.Tensor, x: torch.Tensor, y: torch.Tensor, *, k: torch.Tensor, dim=-1
+):
     r"""
-    Computes the point on the geodesic (shortest) path connecting :math:`x` and
-    :math:`y` at time :math:`x`.
+    Compute the point on the path connecting :math:`x` and :math:`y` at time :math:`x`.
 
     The path can also be treated as an extension of the line segment to an
     unbounded geodesic that goes through :math:`x` and :math:`y`. The equation
@@ -673,13 +943,13 @@ def geodesic(t, x, y, *, K=1.0, dim=-1):
 
     Parameters
     ----------
-    t : float|tensor
+    t : tensor
         travelling time
     x : tensor
         starting point on manifold
     y : tensor
         target point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -689,20 +959,23 @@ def geodesic(t, x, y, *, K=1.0, dim=-1):
     tensor
         point on the geodesic going through x and y
     """
-    return _geodesic(t, x, y, K, dim=dim)
+    return _geodesic(t, x, y, k, dim=dim)
 
 
-def _geodesic(t, x, y, K, dim: int = -1):
+@torch.jit.script
+def _geodesic(
+    t: torch.Tensor, x: torch.Tensor, y: torch.Tensor, k: torch.Tensor, dim: int = -1
+):
     # this is not very numerically stable
-    v = _mobius_add(-x, y, K, dim=dim)
-    tv = _mobius_scalar_mul(t, v, K, dim=dim)
-    gamma_t = _mobius_add(x, tv, K, dim=dim)
+    v = _mobius_add(-x, y, k, dim=dim)
+    tv = _mobius_scalar_mul(t, v, k, dim=dim)
+    gamma_t = _mobius_add(x, tv, k, dim=dim)
     return gamma_t
 
 
-def expmap(x, u, *, K=1.0, dim=-1):
+def expmap(x: torch.Tensor, u: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the exponential map of :math:`u` at :math:`x`.
+    Compute the exponential map of :math:`u` at :math:`x`.
 
     The expmap is tightly related with :func:`geodesic`. Intuitively, the
     expmap represents a smooth travel along a geodesic from the starting point
@@ -731,7 +1004,7 @@ def expmap(x, u, *, K=1.0, dim=-1):
         starting point on manifold
     u : tensor
         speed vector in tangent space at x
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -741,20 +1014,21 @@ def expmap(x, u, *, K=1.0, dim=-1):
     tensor
         :math:`\gamma_{x, u}(1)` end point
     """
-    return _expmap(x, u, K, dim=dim)
+    return _expmap(x, u, k, dim=dim)
 
 
-def _expmap(x, u, K, dim: int = -1):
-    u_norm = u.norm(dim=dim, p=2, keepdim=True).clamp_min(MIN_NORM)
-    lam = _lambda_x(x, K, dim=dim, keepdim=True)
-    second_term = tan_K((lam/2.0) * u_norm, K) * (u/u_norm)
-    y = _mobius_add(x, second_term, K, dim=dim)
+@torch.jit.script
+def _expmap(x: torch.Tensor, u: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    u_norm = u.norm(dim=dim, p=2, keepdim=True).clamp_min(1e-15)
+    lam = _lambda_x(x, k, dim=dim, keepdim=True)
+    second_term = tan_k((lam / 2.0) * u_norm, k) * (u / u_norm)
+    y = _mobius_add(x, second_term, k, dim=dim)
     return y
 
 
-def expmap0(u, *, K=1.0, dim=-1):
+def expmap0(u: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the exponential map of :math:`u` at the origin :math:`0`.
+    Compute the exponential map of :math:`u` at the origin :math:`0`.
 
     .. math::
 
@@ -766,7 +1040,7 @@ def expmap0(u, *, K=1.0, dim=-1):
     ----------
     u : tensor
         speed vector on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -776,19 +1050,25 @@ def expmap0(u, *, K=1.0, dim=-1):
     tensor
         :math:`\gamma_{0, u}(1)` end point
     """
-    return _expmap0(u, K, dim=dim)
+    return _expmap0(u, k, dim=dim)
 
 
-def _expmap0(u, K, dim: int = -1):
-    u_norm = u.norm(dim=dim, p=2, keepdim=True).clamp_min(MIN_NORM)
-    gamma_1 = tan_K(u_norm, K) * (u/u_norm)
+@torch.jit.script
+def _expmap0(u: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    u_norm = u.norm(dim=dim, p=2, keepdim=True).clamp_min(1e-15)
+    gamma_1 = tan_k(u_norm, k) * (u / u_norm)
     return gamma_1
 
 
-def geodesic_unit(t, x, u, *, K=1.0, dim=-1):
+def geodesic_unit(
+    t: torch.Tensor, x: torch.Tensor, u: torch.Tensor, *, k: torch.Tensor, dim=-1
+):
     r"""
-    Computes the point on the unit speed geodesic at time :math:`t`, starting
-    from :math:`x` with initial direction :math:`u/\|u\|_x`.
+    Compute the point on the unit speed geodesic.
+
+    The point on the unit speed geodesic at time :math:`t`, starting
+    from :math:`x` with initial direction :math:`u/\|u\|_x` is computed
+    as follows:
 
     .. math::
 
@@ -802,7 +1082,7 @@ def geodesic_unit(t, x, u, *, K=1.0, dim=-1):
         initial point on manifold
     u : tensor
         initial direction in tangent space at x
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -812,19 +1092,26 @@ def geodesic_unit(t, x, u, *, K=1.0, dim=-1):
     tensor
         the point on the unit speed geodesic
     """
-    return _geodesic_unit(t, x, u, K, dim=dim)
+    return _geodesic_unit(t, x, u, k, dim=dim)
 
 
-def _geodesic_unit(t, x, u, K, dim: int = -1):
-    u_norm = u.norm(dim=dim, p=2, keepdim=True).clamp_min(MIN_NORM)
-    second_term = tan_K(t/2.0, K) * (u / u_norm)
-    gamma_1 = _mobius_add(x, second_term, K, dim=dim)
+@torch.jit.script
+def _geodesic_unit(
+    t: torch.Tensor,
+    x: torch.Tensor,
+    u: torch.Tensor,
+    k: torch.Tensor,
+    dim: int = -1,
+):
+    u_norm = u.norm(dim=dim, p=2, keepdim=True).clamp_min(1e-15)
+    second_term = tan_k(t / 2.0, k) * (u / u_norm)
+    gamma_1 = _mobius_add(x, second_term, k, dim=dim)
     return gamma_1
 
 
-def logmap(x, y, *, K=1.0, dim=-1):
+def logmap(x: torch.Tensor, y: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the logarithmic map of :math:`y` at :math:`x`.
+    Compute the logarithmic map of :math:`y` at :math:`x`.
 
     .. math::
 
@@ -846,7 +1133,7 @@ def logmap(x, y, *, K=1.0, dim=-1):
         starting point on manifold
     y : tensor
         target point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -856,19 +1143,20 @@ def logmap(x, y, *, K=1.0, dim=-1):
     tensor
         tangent vector :math:`u\in T_x M` that transports :math:`x` to :math:`y`
     """
-    return _logmap(x, y, K, dim=dim)
+    return _logmap(x, y, k, dim=dim)
 
 
-def _logmap(x, y, K, dim: int = -1):
-    sub = _mobius_add(-x, y, K, dim=dim)
-    sub_norm = sub.norm(dim=dim, p=2, keepdim=True).clamp_min(MIN_NORM)
-    lam = _lambda_x(x, K, keepdim=True, dim=dim)
-    return 2.0*arctan_K(sub_norm, K) * (sub / (lam*sub_norm))
+@torch.jit.script
+def _logmap(x: torch.Tensor, y: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    sub = _mobius_add(-x, y, k, dim=dim)
+    sub_norm = sub.norm(dim=dim, p=2, keepdim=True).clamp_min(1e-15)
+    lam = _lambda_x(x, k, keepdim=True, dim=dim)
+    return 2.0 * artan_k(sub_norm, k) * (sub / (lam * sub_norm))
 
 
-def logmap0(y, *, K=1.0, dim=-1):
+def logmap0(y: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the logarithmic map of :math:`y` at the origin :math:`0`.
+    Compute the logarithmic map of :math:`y` at the origin :math:`0`.
 
     .. math::
 
@@ -887,7 +1175,7 @@ def logmap0(y, *, K=1.0, dim=-1):
     ----------
     y : tensor
         target point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -897,18 +1185,18 @@ def logmap0(y, *, K=1.0, dim=-1):
     tensor
         tangent vector :math:`u\in T_0 M` that transports :math:`0` to :math:`y`
     """
-    return _logmap0(y, K, dim=dim)
+    return _logmap0(y, k, dim=dim)
 
 
-def _logmap0(y, K, dim: int = -1):
-    y_norm = y.norm(dim=dim, p=2, keepdim=True).clamp_min(MIN_NORM)
-    return (y/y_norm) * arctan_K(y_norm, K)
+@torch.jit.script
+def _logmap0(y: torch.Tensor, k, dim: int = -1):
+    y_norm = y.norm(dim=dim, p=2, keepdim=True).clamp_min(1e-15)
+    return (y / y_norm) * artan_k(y_norm, k)
 
 
-def mobius_matvec(m, x, *, K=1.0, dim=-1):
+def mobius_matvec(m: torch.Tensor, x: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the generalization of matrix-vector multiplication in gyrovector
-    spaces.
+    Compute the generalization of matrix-vector multiplication in gyrovector spaces.
 
     The Möbius matrix vector operation is defined as follows:
 
@@ -918,7 +1206,7 @@ def mobius_matvec(m, x, *, K=1.0, dim=-1):
             \frac{\|Mx\|_2}{\|x\|_2}\tan_\kappa^{-1}(\|x\|_2)
         \right)\frac{Mx}{\|Mx\|_2}
 
-    .. plot:: plots/extended/universal/mobius_matvec.py
+    .. plot:: plots/extended/stereographic/mobius_matvec.py
 
     Parameters
     ----------
@@ -927,7 +1215,7 @@ def mobius_matvec(m, x, *, K=1.0, dim=-1):
         ``m.dim() > 2``, but only last dim reduction is supported
     x : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -937,32 +1225,33 @@ def mobius_matvec(m, x, *, K=1.0, dim=-1):
     tensor
         Möbius matvec result
     """
-    return _mobius_matvec(m, x, K, dim=dim)
+    return _mobius_matvec(m, x, k, dim=dim)
 
 
-def _mobius_matvec(m, x, K, dim: int = -1):
+@torch.jit.script
+def _mobius_matvec(m: torch.Tensor, x: torch.Tensor, k: torch.Tensor, dim: int = -1):
     if m.dim() > 2 and dim != -1:
         raise RuntimeError(
             "broadcasted Möbius matvec is supported for the last dim only"
         )
-    x_norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(MIN_NORM)
+    x_norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(1e-15)
     if dim != -1 or m.dim() == 2:
-        mx = torch.tensordot(x, m, dims=([dim], [1]))
+        mx = torch.tensordot(x, m, ([dim], [1]))
     else:
         mx = torch.matmul(m, x.unsqueeze(-1)).squeeze(-1)
-    mx_norm = mx.norm(dim=dim, keepdim=True, p=2).clamp_min(MIN_NORM)
-    res_c = tan_K(mx_norm / x_norm * arctan_K(x_norm, K), K) * (mx / mx_norm)
-    cond = (mx == 0).prod(dim=dim, keepdim=True, dtype=torch.uint8)
+    mx_norm = mx.norm(dim=dim, keepdim=True, p=2).clamp_min(1e-15)
+    res_c = tan_k(mx_norm / x_norm * artan_k(x_norm, k), k) * (mx / mx_norm)
+    cond = (mx == 0).prod(dim=dim, keepdim=True, dtype=torch.bool)
     res_0 = torch.zeros(1, dtype=res_c.dtype, device=res_c.device)
     res = torch.where(cond, res_0, res_c)
     return res
 
+
 # TODO: check if this extends to gyrovector spaces for positive curvature
 # TODO: add plot
-def mobius_pointwise_mul(w, x, *, K=1.0, dim=-1):
+def mobius_pointwise_mul(w: torch.Tensor, x: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the generalization for point-wise multiplication in gyrovector
-    spaces.
+    Compute the generalization for point-wise multiplication in gyrovector spaces.
 
     The Möbius pointwise multiplication is defined as follows
 
@@ -979,7 +1268,7 @@ def mobius_pointwise_mul(w, x, *, K=1.0, dim=-1):
         weights for multiplication (should be broadcastable to x)
     x : tensor
         point on manifold
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -989,24 +1278,26 @@ def mobius_pointwise_mul(w, x, *, K=1.0, dim=-1):
     tensor
         Möbius point-wise mul result
     """
-    return _mobius_pointwise_mul(w, x, K, dim=dim)
+    return _mobius_pointwise_mul(w, x, k, dim=dim)
 
 
-def _mobius_pointwise_mul(w, x, K, dim: int = -1):
-    x_norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(MIN_NORM)
+@torch.jit.script
+def _mobius_pointwise_mul(
+    w: torch.Tensor, x: torch.Tensor, k: torch.Tensor, dim: int = -1
+):
+    x_norm = x.norm(dim=dim, keepdim=True, p=2).clamp_min(1e-15)
     wx = w * x
-    wx_norm = wx.norm(dim=dim, keepdim=True, p=2).clamp_min(MIN_NORM)
-    res_c = tan_K(wx_norm / x_norm * arctan_K(x_norm, K), K) * (wx/wx_norm)
-    cond = (wx == 0).prod(dim=dim, keepdim=True, dtype=torch.uint8)
-    res_0 = torch.zeros(1, dtype=res_c.dtype, device=res_c.device)
-    res = torch.where(cond, res_0, res_c)
+    wx_norm = wx.norm(dim=dim, keepdim=True, p=2).clamp_min(1e-15)
+    res_c = tan_k(wx_norm / x_norm * artan_k(x_norm, k), k) * (wx / wx_norm)
+    zero = torch.zeros((), dtype=res_c.dtype, device=res_c.device)
+    cond = wx.isclose(zero).prod(dim=dim, keepdim=True, dtype=torch.bool)
+    res = torch.where(cond, zero, res_c)
     return res
 
 
-def mobius_fn_apply_chain(x, *fns, K=1.0, dim=-1):
+def mobius_fn_apply_chain(x: torch.Tensor, *fns: callable, k: torch.Tensor, dim=-1):
     r"""
-    Computes the generalization of sequential function application in gyrovector
-    spaces.
+    Compute the generalization of sequential function application in gyrovector spaces.
 
     First, a gyrovector is mapped to the tangent space (first-order approx.) via
     :math:`\operatorname{log}^\kappa_0` and then the sequence of functions is
@@ -1041,7 +1332,7 @@ def mobius_fn_apply_chain(x, *fns, K=1.0, dim=-1):
         point on manifold
     fns : callable[]
         functions to apply
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -1054,16 +1345,18 @@ def mobius_fn_apply_chain(x, *fns, K=1.0, dim=-1):
     if not fns:
         return x
     else:
-        ex = _logmap0(x, K, dim=dim)
+        ex = _logmap0(x, k, dim=dim)
         for fn in fns:
             ex = fn(ex)
-        y = _expmap0(ex, K, dim=dim)
+        y = _expmap0(ex, k, dim=dim)
         return y
 
 
-def mobius_fn_apply(fn, x, *args, K=1.0, dim=-1, **kwargs):
+def mobius_fn_apply(
+    fn: callable, x: torch.Tensor, *args, k: torch.Tensor, dim=-1, **kwargs
+):
     r"""
-    Computes the generalization of function application in gyrovector spaces.
+    Compute the generalization of function application in gyrovector spaces.
 
     First, a gyrovector is mapped to the tangent space (first-order approx.) via
     :math:`\operatorname{log}^\kappa_0` and then the function is applied
@@ -1076,7 +1369,7 @@ def mobius_fn_apply(fn, x, *args, K=1.0, dim=-1, **kwargs):
         =
         \operatorname{exp}^\kappa_0(f(\operatorname{log}^\kappa_0(y)))
 
-    .. plot:: plots/extended/universal/mobius_sigmoid_apply.py
+    .. plot:: plots/extended/stereographic/mobius_sigmoid_apply.py
 
     Parameters
     ----------
@@ -1084,7 +1377,7 @@ def mobius_fn_apply(fn, x, *args, K=1.0, dim=-1, **kwargs):
         point on manifold
     fn : callable
         function to apply
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -1094,15 +1387,15 @@ def mobius_fn_apply(fn, x, *args, K=1.0, dim=-1, **kwargs):
     tensor
         Result of function in hyperbolic space
     """
-    ex = _logmap0(x, K, dim=dim)
+    ex = _logmap0(x, k, dim=dim)
     ex = fn(ex, *args, **kwargs)
-    y = _expmap0(ex, K, dim=dim)
+    y = _expmap0(ex, k, dim=dim)
     return y
 
 
-def mobiusify(fn):
+def mobiusify(fn: callable):
     r"""
-    Wraps a function such that is works in gyrovector spaces.
+    Wrap a function such that is works in gyrovector spaces.
 
     Parameters
     ----------
@@ -1116,28 +1409,37 @@ def mobiusify(fn):
 
     Notes
     -----
-    New function will accept additional argument ``K``.
+    New function will accept additional argument ``k`` and ``dim``.
     """
 
     @functools.wraps(fn)
-    def mobius_fn(x, *args, K=1.0, dim=-1, **kwargs):
-        ex = _logmap0(x, K, dim=dim)
+    def mobius_fn(x, *args, k, dim=-1, **kwargs):
+        ex = _logmap0(x, k, dim=dim)
         ex = fn(ex, *args, **kwargs)
-        y = _expmap0(ex, K, dim=dim)
+        y = _expmap0(ex, k, dim=dim)
         return y
 
     return mobius_fn
 
 
-def dist2plane(x, p, a, *, K=1.0, keepdim=False, signed=False, dim=-1):
+def dist2plane(
+    x: torch.Tensor,
+    p: torch.Tensor,
+    a: torch.Tensor,
+    *,
+    k: torch.Tensor,
+    keepdim=False,
+    signed=False,
+    scaled=False,
+    dim=-1,
+):
     r"""
-    Computes the geodesic distance from :math:`x` to a hyperplane going through
-    :math:`x` with the normal vector :math:`a`.
+    Geodesic distance from :math:`x` to a hyperplane :math:`H_{a, b}`.
 
     The hyperplane is such that its set of points is orthogonal to :math:`a` and
     contains :math:`p`.
 
-    .. plot:: plots/extended/universal/distance2plane.py
+    .. plot:: plots/extended/stereographic/distance2plane.py
 
     To form an intuition what is a hyperplane in gyrovector spaces, let's first
     consider an Euclidean hyperplane
@@ -1242,12 +1544,14 @@ def dist2plane(x, p, a, *, K=1.0, keepdim=False, signed=False, dim=-1):
         hyperplane normal vector in tangent space of :math:`p`
     p : tensor
         point on manifold lying on the hyperplane
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     keepdim : bool
         retain the last dim? (default: false)
     signed : bool
         return signed distance
+    scaled : bool
+        scale distance by tangent norm
     dim : int
         reduction dimension for operations
 
@@ -1256,257 +1560,47 @@ def dist2plane(x, p, a, *, K=1.0, keepdim=False, signed=False, dim=-1):
     tensor
         distance to the hyperplane
     """
-    return _dist2plane(x, a, p, K, keepdim=keepdim, signed=signed, dim=dim)
+    return _dist2plane(
+        x, a, p, k, keepdim=keepdim, signed=signed, dim=dim, scaled=scaled
+    )
 
 
-def _dist2plane(x, a, p, K, keepdim: bool = False, signed: bool = False,
-                dim: int = -1):
-    diff = _mobius_add(-p, x, K, dim=dim)
-    diff_norm2 = diff.pow(2).sum(dim=dim, keepdim=keepdim).clamp_min(MIN_NORM)
+@torch.jit.script
+def _dist2plane(
+    x: torch.Tensor,
+    a: torch.Tensor,
+    p: torch.Tensor,
+    k: torch.Tensor,
+    keepdim: bool = False,
+    signed: bool = False,
+    scaled: bool = False,
+    dim: int = -1,
+):
+    diff = _mobius_add(-p, x, k, dim=dim)
+    diff_norm2 = diff.pow(2).sum(dim=dim, keepdim=keepdim).clamp_min(1e-15)
     sc_diff_a = (diff * a).sum(dim=dim, keepdim=keepdim)
     if not signed:
         sc_diff_a = sc_diff_a.abs()
-    a_norm = a.norm(dim=dim, keepdim=keepdim, p=2).clamp_min(MIN_NORM)
+    a_norm = a.norm(dim=dim, keepdim=keepdim, p=2)
     num = 2.0 * sc_diff_a
-    denom = ((1 + K * diff_norm2) * a_norm).clamp_min(MIN_NORM)
-    return arcsin_K(num / denom, K)
+    denom = clamp_abs((1 + k * diff_norm2) * a_norm)
+    distance = arsin_k(num / denom, k)
+    if scaled:
+        distance = distance * a_norm
+    return distance
 
 
-def sproj(x, K):
-    factor = 1.0 / (1.0 + torch.sqrt(K.abs())*x[:,-1])
-    proj = factor[:, None] * x[:,:-1]
-    return proj
-
-
-def inv_sproj(x, K):
-    lam_x = _lambda_x(x, K, keepdim=True, dim=-1)
-    A = lam_x[:, None] * x
-    B = 1.0/torch.sqrt(K.abs())*(lam_x - 1.0).unsqueeze(dim=-1)
-    proj = torch.cat((A,B), dim=-1)
-    return proj
-
-
-def antipode(x, K, dim: int = -1):
+def parallel_transport(
+    x: torch.Tensor, y: torch.Tensor, v: torch.Tensor, *, k: torch.Tensor, dim=-1
+):
     r"""
-    Computes the antipode of a point :math:`x_1,...,x_n` for :math:`\kappa > 0`.
-
-    Let :math:`x` be a point on some sphere. Then :math:`-x` is its antipode.
-    Since we're dealing with stereographic projections, for :math:`sproj(x)` we
-    get the antipode :math:`sproj(-x)`. Which is given as follows:
-
-    .. math::
-
-        \text{antipode}(x)
-        =
-        \frac{1+\kappa\|x\|^2_2}{2\kappa\|x\|^2_2}{}(-x)
-
-    Parameters
-    ----------
-    x : tensor
-        points :math:`x_1,...,x_n` on manifold to compute antipode for
-    K : float|tensor
-        sectional curvature of manifold
-    dim : int
-        reduction dimension for operations
-
-    Returns
-    -------
-    tensor
-        antipode
-    """
-    return _antipode(x, K, dim=dim)
-
-
-def _antipode(x, K, dim=-1):
-    # TODO: add implementation that uses stereographic projections!!!
-    # TODO: this one is correct, but it could be more efficient!!!
-    v = x/x.norm(p=2, dim=-1)
-    R = 1.0/torch.sqrt(K.abs())
-    import math
-    return _geodesic_unit(math.pi*R, x, v, K, dim=-1)
-
-
-def weighted_midpoint(x, a, *, K=1.0, keepdim=False, dim=-1):
-    r"""
-    Computes the weighted Möbius gyromidpoint of a set of points
-    :math:`x_1,...,x_n` according to weights :math:`\alpha_1,...,\alpha_n`.
-
-    The gyromidpoint looks as follows:
-
-    .. plot:: plots/extended/universal/midpoint.py
-
-    The weighted Möbius gyromidpoint is computed as follows
-
-    .. math::
-
-        m_{\kappa}(x_1,\ldots,x_n,\alpha_1,\ldots,\alpha_n)
-        =
-        \frac{1}{2}
-        \otimes_\kappa
-        \left(
-        \sum_{i=1}^n
-        \frac{
-        \alpha_i\lambda_{x_i}^\kappa
-        }{
-        \sum_{j=1}^n\alpha_j(\lambda_{x_j}^\kappa-1)
-        }
-        x_i
-        \right)
-
-    where the weights :math:`\alpha_1,...,\alpha_n` do not necessarily need
-    to sum to 1 (only their relative weight matters). Note that this formula
-    also requires to choose between the midpoint and its antipode for
-    :math:`\kappa > 0`.
-
-    Parameters
-    ----------
-    x : tensor
-        points :math:`x_1,...,x_n` on manifold to compute weighted Möbius
-        gyromidpoint for
-    a : tensor
-        scalar midpoint weights :math:`\alpha_1,...,\alpha_n`
-    K : float|tensor
-        sectional curvature of manifold
-    keepdim : bool
-        retain the last dim? (default: false)
-    dim : int
-        reduction dimension for operations
-
-    Returns
-    -------
-    tensor
-        weighted Möbius gyromidpoint
-    """
-    return _weighted_midpoint(x, a, K, keepdim=keepdim, dim=dim)
-
-
-def _weighted_midpoint(x, w, K, keepdim: bool = False, dim: int = -1):
-    lam_x = _lambda_x(x, K, keepdim=False, dim=dim)
-    w_times_lam_x = w * lam_x
-    denominator = (w_times_lam_x - w).sum()
-
-    # min-clamp denominator
-    s = torch.sign(torch.sign(denominator) + 0.1)
-    if denominator.abs() < MIN_NORM:
-        denominator = s * MIN_NORM
-    linear_weights = w_times_lam_x / denominator
-
-    # multiply rows of X by linear weights
-    # TODO: incorporate dimension independence in next two lines
-    x = x.t()
-    rhs = torch.matmul(x, linear_weights).t()
-    x = x.t()   # restore
-    # TODO: remove dimension appropriately (the specified one)
-    if not keepdim:
-        rhs = rhs.squeeze()
-
-    # determine midpoint
-    midpoint = None
-    m = _mobius_scalar_mul(0.5, rhs, K, dim=dim)
-    # also compute and compare to antipode of m for positive curvature
-    if K > 0:
-        m_a = _antipode(m, K, dim=dim)
-        # determine whether m or m_a minimizes the sum of distances
-        d = _dist(x, m, K, keepdim=keepdim, dim=dim).sum(dim=dim, keepdim=False)
-        d_a = _dist(x, m_a, K, keepdim=keepdim, dim=dim).sum(dim=dim, keepdim=False)
-        # use midpoint that has smaller sum of squared distances
-        midpoint = m if d < d_a else m_a
-    else:
-        midpoint = m
-
-    return midpoint
-
-
-def gyration(a, b, u, *, K=1.0, dim=-1):
-    r"""
-    Computes the gyration of :math:`u` by :math:`[a,b]`.
-
-    The gyration is a special operation of gyrovector spaces. The gyrovector
-    space addition operation :math:`\oplus_\kappa` is not associative (as
-    mentioned in :func:`mobius_add`), but it is gyroassociative, which means
-
-    .. math::
-
-        u \oplus_\kappa (v \oplus_\kappa w)
-        =
-        (u\oplus_\kappa v) \oplus_\kappa \operatorname{gyr}[u, v]w,
-
-    where
-
-    .. math::
-
-        \operatorname{gyr}[u, v]w
-        =
-        \ominus (u \oplus_\kappa v) \oplus (u \oplus_\kappa (v \oplus_\kappa w))
-
-    We can simplify this equation using the explicit formula for the Möbius
-    addition [1]. Recall,
-
-    .. math::
-
-        A = - \kappa^2 \langle u, w\rangle \langle v, v\rangle
-            - \kappa \langle v, w\rangle
-            + 2 \kappa^2 \langle u, v\rangle \langle v, w\rangle\\
-        B = - \kappa^2 \langle v, w\rangle \langle u, u\rangle
-            + \kappa \langle u, w\rangle\\
-        D = 1 - 2 \kappa \langle u, v\rangle
-            + \kappa^2 \langle u, u\rangle \langle v, v\rangle\\
-
-        \operatorname{gyr}[u, v]w = w + 2 \frac{A u + B v}{D}.
-
-    Parameters
-    ----------
-    a : tensor
-        first point on manifold
-    b : tensor
-        second point on manifold
-    u : tensor
-        vector field for operation
-    K : float|tensor
-        sectional curvature of manifold
-    dim : int
-        reduction dimension for operations
-
-    Returns
-    -------
-    tensor
-        the result of automorphism
-
-    References
-    ----------
-    [1]  A. A. Ungar (2009), A Gyrovector Space Approach to Hyperbolic Geometry
-    """
-    return _gyration(a, b, u, K, dim=dim)
-
-
-def _gyration(u, v, w, K, dim: int = -1):
-    # non-simplified
-    # mupv = -_mobius_add(u, v, K)
-    # vpw = _mobius_add(u, w, K)
-    # upvpw = _mobius_add(u, vpw, K)
-    # return _mobius_add(mupv, upvpw, K)
-    # simplified
-    u2 = u.pow(2).sum(dim=dim, keepdim=True)
-    v2 = v.pow(2).sum(dim=dim, keepdim=True)
-    uv = (u * v).sum(dim=dim, keepdim=True)
-    uw = (u * w).sum(dim=dim, keepdim=True)
-    vw = (v * w).sum(dim=dim, keepdim=True)
-    K2 = K ** 2
-    a = -K2 * uw * v2 - K * vw + 2 * K2 * uv * vw
-    b = -K2 * vw * u2 + K * uw
-    d = 1 - 2 * K * uv + K2 * u2 * v2
-    return w + 2 * (a * u + b * v) / d.clamp_min(MIN_NORM)
-
-
-def parallel_transport(x, y, v, *, K=1.0, dim=-1):
-    r"""
-    Computes the parallel transport of :math:`v` from :math:`x` to :math:`y`.
+    Compute the parallel transport of :math:`v` from :math:`x` to :math:`y`.
 
     The parallel transport is essential for adaptive algorithms on Riemannian
     manifolds. For gyrovector spaces the parallel transport is expressed through
     the gyration.
 
-    .. plot:: plots/extended/universal/gyrovector_parallel_transport.py
+    .. plot:: plots/extended/stereographic/gyrovector_parallel_transport.py
 
     To recover parallel transport we first need to study isomorphisms between
     gyrovectors and vectors. The reason is that originally, parallel transport
@@ -1541,7 +1635,7 @@ def parallel_transport(x, y, v, *, K=1.0, dim=-1):
         =
         \operatorname{gyr}[y, -x] v \lambda^\kappa_x / \lambda^\kappa_y
 
-    .. plot:: plots/extended/universal/parallel_transport.py
+    .. plot:: plots/extended/stereographic/parallel_transport.py
 
 
     Parameters
@@ -1552,7 +1646,7 @@ def parallel_transport(x, y, v, *, K=1.0, dim=-1):
         end point
     v : tensor
         tangent vector at x to be transported to y
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -1562,21 +1656,23 @@ def parallel_transport(x, y, v, *, K=1.0, dim=-1):
     tensor
         transported vector
     """
-    return _parallel_transport(x, y, v, K, dim=dim)
+    return _parallel_transport(x, y, v, k, dim=dim)
 
 
-def _parallel_transport(x, y, u, K, dim: int = -1):
+@torch.jit.script
+def _parallel_transport(
+    x: torch.Tensor, y: torch.Tensor, u: torch.Tensor, k: torch.Tensor, dim: int = -1
+):
     return (
-        _gyration(y, -x, u, K, dim=dim)
-        * _lambda_x(x, K, keepdim=True, dim=dim)
-        / _lambda_x(y, K, keepdim=True, dim=dim)
+        _gyration(y, -x, u, k, dim=dim)
+        * _lambda_x(x, k, keepdim=True, dim=dim)
+        / _lambda_x(y, k, keepdim=True, dim=dim)
     )
 
 
-def parallel_transport0(y, v, *, K=1.0, dim=-1):
+def parallel_transport0(y: torch.Tensor, v: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Computes the parallel transport of :math:`v` from the origin :math:`0` to
-    :math:`y`.
+    Compute the parallel transport of :math:`v` from the origin :math:`0` to :math:`y`.
 
     This is just a special case of the parallel transport with the starting
     point at the origin that can be computed more efficiently and more
@@ -1588,7 +1684,7 @@ def parallel_transport0(y, v, *, K=1.0, dim=-1):
         target point
     v : tensor
         vector to be transported from the origin to y
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -1597,14 +1693,19 @@ def parallel_transport0(y, v, *, K=1.0, dim=-1):
     -------
     tensor
     """
-    return _parallel_transport0(y, v, K, dim=dim)
+    return _parallel_transport0(y, v, k, dim=dim)
 
 
-def _parallel_transport0(y, v, K, dim: int = -1):
-    return v * (1 + K * y.pow(2).sum(dim=dim, keepdim=True)).clamp_min(MIN_NORM)
+@torch.jit.script
+def _parallel_transport0(
+    y: torch.Tensor, v: torch.Tensor, k: torch.Tensor, dim: int = -1
+):
+    return v * (1 + k * y.pow(2).sum(dim=dim, keepdim=True)).clamp_min(1e-15)
 
 
-def parallel_transport0back(x, v, *, K=1.0, dim: int = -1):
+def parallel_transport0back(
+    x: torch.Tensor, v: torch.Tensor, *, k: torch.Tensor, dim: int = -1
+):
     r"""
     Perform parallel transport to the zero point.
 
@@ -1617,7 +1718,7 @@ def parallel_transport0back(x, v, *, K=1.0, dim: int = -1):
         target point
     v : tensor
         vector to be transported
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -1626,17 +1727,19 @@ def parallel_transport0back(x, v, *, K=1.0, dim: int = -1):
     -------
     tensor
     """
-    return _parallel_transport0back(x, v, K=K, dim=dim)
+    return _parallel_transport0back(x, v, k=k, dim=dim)
 
 
-def _parallel_transport0back(x, v, K, dim: int = -1):
-    return v / (1 + K * x.pow(2).sum(dim=dim, keepdim=True)).clamp_min(MIN_NORM)
+@torch.jit.script
+def _parallel_transport0back(
+    x: torch.Tensor, v: torch.Tensor, k: torch.Tensor, dim: int = -1
+):
+    return v / (1 + k * x.pow(2).sum(dim=dim, keepdim=True)).clamp_min(1e-15)
 
 
-def egrad2rgrad(x, grad, *, K=1.0, dim=-1):
+def egrad2rgrad(x: torch.Tensor, grad: torch.Tensor, *, k: torch.Tensor, dim=-1):
     r"""
-    Converts the Euclidean gradient to the Riemannian gradient in the tangent
-    space of :math:`x`.
+    Convert the Euclidean gradient to the Riemannian gradient.
 
     .. math::
 
@@ -1648,7 +1751,7 @@ def egrad2rgrad(x, grad, *, K=1.0, dim=-1):
         point on the manifold
     grad : tensor
         Euclidean gradient for :math:`x`
-    K : float|tensor
+    k : tensor
         sectional curvature of manifold
     dim : int
         reduction dimension for operations
@@ -1658,8 +1761,246 @@ def egrad2rgrad(x, grad, *, K=1.0, dim=-1):
     tensor
         Riemannian gradient :math:`u\in T_x\mathcal{M}_\kappa^n`
     """
-    return _egrad2rgrad(x, grad, K, dim=dim)
+    return _egrad2rgrad(x, grad, k, dim=dim)
 
 
-def _egrad2rgrad(x, grad, K, dim: int = -1):
-    return grad / _lambda_x(x, K, keepdim=True, dim=dim) ** 2
+@torch.jit.script
+def _egrad2rgrad(x: torch.Tensor, grad: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    return grad / _lambda_x(x, k, keepdim=True, dim=dim) ** 2
+
+
+def sproj(x: torch.Tensor, *, k: torch.Tensor, dim: int = -1):
+    """
+    Stereographic Projection from hyperboloid or sphere.
+
+    Parameters
+    ----------
+    x : tensor
+        point to be projected
+    k : tensor
+        constant sectional curvature
+    dim : int
+        dimension to operate on
+
+    Returns
+    -------
+    tensor
+        the result of the projection
+    """
+    return _sproj(x, k, dim=dim)
+
+
+@torch.jit.script
+def _sproj(x: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    inv_r = torch.sqrt(sabs(k))
+    factor = 1.0 / (1.0 + inv_r * x.narrow(dim, -1, 1))
+    proj = factor * x.narrow(dim, 0, x.size(dim) - 1)
+    return proj
+
+
+def inv_sproj(x: torch.Tensor, *, k: torch.Tensor, dim: int = -1):
+    """
+    Inverse of Stereographic Projection to hyperboloid or sphere.
+
+    Parameters
+    ----------
+    x : tensor
+        point to be projected
+    k : tensor
+        constant sectional curvature
+    dim : int
+        dimension to operate on
+
+    Returns
+    -------
+    tensor
+        the result of the projection
+    """
+    return _inv_sproj(x, k, dim=dim)
+
+
+@torch.jit.script
+def _inv_sproj(x: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    inv_r = torch.sqrt(sabs(k))
+    lam_x = _lambda_x(x, k, keepdim=True, dim=dim)
+    A = lam_x * x
+    B = 1.0 / inv_r * (lam_x - 1.0)
+    proj = torch.cat((A, B), dim=dim)
+    return proj
+
+
+def antipode(x: torch.Tensor, *, k: torch.Tensor, dim: int = -1):
+    r"""
+    Compute the antipode of a point :math:`x_1,...,x_n` for :math:`\kappa > 0`.
+
+    Let :math:`x` be a point on some sphere. Then :math:`-x` is its antipode.
+    Since we're dealing with stereographic projections, for :math:`sproj(x)` we
+    get the antipode :math:`sproj(-x)`. Which is given as follows:
+
+    .. math::
+
+        \text{antipode}(x)
+        =
+        \frac{1+\kappa\|x\|^2_2}{2\kappa\|x\|^2_2}{}(-x)
+
+    Parameters
+    ----------
+    x : tensor
+        points :math:`x_1,...,x_n` on manifold to compute antipode for
+    k : tensor
+        sectional curvature of manifold
+    dim : int
+        reduction dimension for operations
+
+    Returns
+    -------
+    tensor
+        antipode
+    """
+    return _antipode(x, k, dim=dim)
+
+
+@torch.jit.script
+def _antipode(x: torch.Tensor, k: torch.Tensor, dim: int = -1):
+    # NOTE: implementation that uses stereographic projections seems to be less accurate
+    # sproj(-inv_sproj(x))
+    if torch.all(k.le(0)):
+        return -x
+    v = x / x.norm(p=2, dim=dim, keepdim=True).clamp_min(1e-15)
+    R = sabs(k).sqrt().reciprocal()
+    pi = 3.141592653589793
+
+    a = _geodesic_unit(pi * R, x, v, k, dim=dim)
+    return torch.where(k.gt(0), a, -x)
+
+
+def weighted_midpoint(
+    xs: torch.Tensor,
+    weights: Optional[torch.Tensor] = None,
+    *,
+    k: torch.Tensor,
+    reducedim: Optional[List[int]] = None,
+    dim: int = -1,
+    keepdim: bool = False,
+    lincomb: bool = False,
+    posweight: bool = False,
+):
+    r"""
+    Compute weighted Möbius gyromidpoint.
+
+    The weighted Möbius gyromidpoint of a set of points
+    :math:`x_1,...,x_n` according to weights
+    :math:`\alpha_1,...,\alpha_n` is computed as follows:
+
+    The weighted Möbius gyromidpoint is computed as follows
+
+    .. math::
+
+        m_{\kappa}(x_1,\ldots,x_n,\alpha_1,\ldots,\alpha_n)
+        =
+        \frac{1}{2}
+        \otimes_\kappa
+        \left(
+        \sum_{i=1}^n
+        \frac{
+        \alpha_i\lambda_{x_i}^\kappa
+        }{
+        \sum_{j=1}^n\alpha_j(\lambda_{x_j}^\kappa-1)
+        }
+        x_i
+        \right)
+
+    where the weights :math:`\alpha_1,...,\alpha_n` do not necessarily need
+    to sum to 1 (only their relative weight matters). Note that this formula
+    also requires to choose between the midpoint and its antipode for
+    :math:`\kappa > 0`.
+
+    Parameters
+    ----------
+    xs : tensor
+        points on poincare ball
+    weights : tensor
+        weights for averaging (make sure they broadcast correctly and manifold dimension is skipped)
+    reducedim : int|list|tuple
+        reduce dimension
+    dim : int
+        dimension to calculate conformal and Lorenz factors
+    k : tensor
+        constant sectional curvature
+    keepdim : bool
+        retain the last dim? (default: false)
+    lincomb : bool
+        linear combination implementation
+    posweight : bool
+        make all weights positive. Negative weight will weight antipode of entry with positive weight instead.
+        This will give experimentally better numerics and nice interpolation
+        properties for linear combination and averaging
+
+    Returns
+    -------
+    tensor
+        Einstein midpoint in poincare coordinates
+    """
+    return _weighted_midpoint(
+        xs=xs,
+        k=k,
+        weights=weights,
+        reducedim=reducedim,
+        dim=dim,
+        keepdim=keepdim,
+        lincomb=lincomb,
+        posweight=posweight,
+    )
+
+
+@torch.jit.script
+def _weighted_midpoint(
+    xs: torch.Tensor,
+    k: torch.Tensor,
+    weights: Optional[torch.Tensor] = None,
+    reducedim: Optional[List[int]] = None,
+    dim: int = -1,
+    keepdim: bool = False,
+    lincomb: bool = False,
+    posweight: bool = False,
+):
+    if reducedim is None:
+        reducedim = list_range(xs.dim())
+        reducedim.pop(dim)
+    gamma = _lambda_x(xs, k=k, dim=dim, keepdim=True)
+    if weights is None:
+        weights = torch.tensor(1.0, dtype=xs.dtype, device=xs.device)
+    else:
+        weights = weights.unsqueeze(dim)
+    if posweight and weights.lt(0).any():
+        xs = torch.where(weights.lt(0), _antipode(xs, k=k, dim=dim), xs)
+        weights = weights.abs()
+    denominator = ((gamma - 1) * weights).sum(reducedim, keepdim=True)
+    nominator = (gamma * weights * xs).sum(reducedim, keepdim=True)
+    two_mean = nominator / clamp_abs(denominator, 1e-10)
+    a_mean = _mobius_scalar_mul(
+        torch.tensor(0.5, dtype=xs.dtype, device=xs.device), two_mean, k=k, dim=dim
+    )
+    if torch.any(k.gt(0)):
+        # check antipode
+        b_mean = _antipode(a_mean, k, dim=dim)
+        a_dist = _dist(a_mean, xs, k=k, keepdim=True, dim=dim).sum(
+            reducedim, keepdim=True
+        )
+        b_dist = _dist(b_mean, xs, k=k, keepdim=True, dim=dim).sum(
+            reducedim, keepdim=True
+        )
+        better = k.gt(0) & (b_dist < a_dist)
+        a_mean = torch.where(better, b_mean, a_mean)
+    if lincomb:
+        if weights.numel() == 1:
+            alpha = weights.clone()
+            for d in reducedim:
+                alpha *= xs.size(d)
+        else:
+            weights, _ = torch.broadcast_tensors(weights, gamma)
+            alpha = weights.sum(reducedim, keepdim=True)
+        a_mean = _mobius_scalar_mul(alpha, a_mean, k=k, dim=dim)
+    if not keepdim:
+        a_mean = drop_dims(a_mean, reducedim)
+    return a_mean

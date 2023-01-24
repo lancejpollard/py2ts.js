@@ -63,9 +63,153 @@ function process(input) {
     case 'assignment':
       processAssignment(input)
       break
+    case 'string':
+      processString(input)
+      break
+    case 'function_definition':
+      processFunctionDefinition(input)
+      break
+    case 'return_statement':
+      processReturnStatement(input)
+      break
+    case 'call':
+      processCall(input)
+      break
+    case 'binary_operator':
+      processBinaryOperator(input)
+      break
+    case 'if_statement':
+      break
+    case 'reference':
+      processReference(input)
+      break
+    case 'parenthesized_expression':
+      processParenthesizedExpression(input)
+      break
+    case 'integer':
+      processInteger(input)
+      break
+    case 'float':
+      processFloat(input)
+      break
+    case 'keyword_argument':
+      break
+    case 'unary_operator':
+      break
+    case 'member_expression':
+      processMemberExpression(input)
+      break
     default:
       throwNode(input.node)
   }
+}
+
+function processMemberExpression(input) {}
+
+function processCall(input) {
+  const object = []
+  process({ ...input, node: input.node.attribute, body: object })
+
+  const args = []
+  input.node.args.forEach(node => {
+    const arg = []
+    args.push(arg)
+    process({ ...input, node, body: arg })
+  })
+
+  input.body.push(
+    `${object.join('')}(${args.map(arg => arg.join('\n')).join(', ')})`,
+  )
+}
+
+function processString(input) {
+  if (input.node.value.match(/^r?"""/)) {
+    input.body.push(
+      '`' +
+        input.node.value
+          .replace(/^r?"""/, '')
+          .replace(/"""$/, '')
+          .replace(/\\/g, '\\\\')
+          .replace(/`/g, '\\`') +
+        '`',
+    )
+  } else {
+    input.body.push(input.node.value)
+  }
+}
+
+function processFloat(input) {
+  input.body.push(input.node.value)
+}
+
+function processInteger(input) {
+  input.body.push(input.node.value)
+}
+
+function processBinaryOperator(input) {
+  const left = []
+  process({ ...input, node: input.node.left, body: left })
+
+  const right = []
+  process({ ...input, node: input.node.right, body: right })
+
+  input.body.push(
+    `${left.join(' ')} ${input.node.operator} ${right.join(' ')}`,
+  )
+}
+
+function processReference(input) {
+  input.body.push(input.node.name)
+}
+
+function processParenthesizedExpression(input) {
+  const body = []
+  process({ ...input, node: input.node.expression, body })
+
+  input.body.push(`(${body.join(' ')})`)
+}
+
+function processReturnStatement(input) {
+  const statement = []
+  process({ ...input, node: input.node.statement, body: statement })
+
+  if (statement.length === 1) {
+    input.body.push(`return ${statement.join('')}`)
+  } else {
+    input.body.push(`return (`)
+    statement.forEach(line => {
+      input.body.push(`  ${line}`)
+    })
+    input.body.push(')')
+  }
+}
+
+function processFunctionDefinition(input) {
+  const { name, returnType } = input.node
+  const params = []
+  input.node.parameters.forEach(node => {
+    let type = getTypeName(node.typeName)
+    params.push(`${_.camelCase(node.name)}${type ? `: ${type}` : ``}`)
+  })
+
+  const body = []
+  input.node.body.forEach(node => {
+    process({ ...input, node, body, scope: 'function' })
+  })
+
+  const type = getTypeName(returnType)
+
+  input.body.push(
+    `function ${_.camelCase(name)}(${params.join(', ')})${
+      type ? `: ${type}` : ``
+    } {`,
+  )
+
+  body.forEach(line => {
+    input.body.push(`  ${line}`)
+  })
+
+  input.body.push('}')
 }
 
 function processAssignment(input) {}
