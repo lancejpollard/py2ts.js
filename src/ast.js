@@ -10,7 +10,7 @@ function build(string) {
   const tree = parser.parse(string)
   const body = []
 
-  body.push(...process({ node: tree.rootNode }))
+  body.push(...process({ node: tree.rootNode, scope: 'module' }))
 
   return { type: 'program', body }
 }
@@ -220,7 +220,7 @@ function processList(input) {
       case 'false':
         info.items[i] = {
           type: 'boolean',
-          name: node.type,
+          value: node.type,
         }
         break
       default:
@@ -307,48 +307,48 @@ function processAssignment(input) {
         break
       case 'subscript':
         if (!input.left) {
-          input.right = processSubscript({ ...input, node })
+          info.right = processSubscript({ ...input, node })
         } else {
-          input.right = processSubscript({ ...input, node })
+          info.right = processSubscript({ ...input, node })
         }
         break
       case 'float':
         info.right = processFloat({ ...input, node })
         break
       case 'dictionary':
-        input.right = processDictionary({ ...input, node })
+        info.right = processDictionary({ ...input, node })
         break
       case 'parenthesized_expression':
-        input.right = processParenthesizedExpression({ ...input, node })
+        info.right = processParenthesizedExpression({ ...input, node })
         break
       case 'binary_operator':
-        input.right = processBinaryOperator({ ...input, node })
+        info.right = processBinaryOperator({ ...input, node })
         break
       case 'comparison_operator':
-        input.right = processComparisonOperator({ ...input, node })
+        info.right = processComparisonOperator({ ...input, node })
         break
       case 'tuple_pattern':
         if (!input.left) {
-          input.right = processTuplePattern({ ...input, node })
+          info.right = processTuplePattern({ ...input, node })
         } else {
-          input.right = processTuplePattern({ ...input, node })
+          info.right = processTuplePattern({ ...input, node })
         }
         break
       case 'attribute':
         if (!input.left) {
           input.left = processAttribute({ ...input, node })
         } else {
-          input.right = processAttribute({ ...input, node })
+          info.right = processAttribute({ ...input, node })
         }
         break
       case 'call':
-        input.right = processCall({ ...input, node })
+        info.right = processCall({ ...input, node })
         break
       case 'none':
-        input.right = processNone({ ...input, node })
+        info.right = processNone({ ...input, node })
         break
       case 'conditional_expression':
-        input.right = processConditionalExpression({ ...input, node })
+        info.right = processConditionalExpression({ ...input, node })
         break
       default:
         throwNode(node, input.node)
@@ -365,6 +365,22 @@ function processFloat(input) {
 }
 
 function processString(input) {
+  if (
+    input.scope.match(
+      /module|function|class|if_statement|for_statement/,
+    ) &&
+    input.node.text.match(/^r?"""/)
+  ) {
+    return {
+      type: 'comment',
+      text:
+        '`' +
+        input.node.text.replace(/^r?"""/, '').replace(/"""$/, '') +
+        // .replace(/\\/g, '\\\\')
+        // .replace(/`/g, '\\`') +
+        '`',
+    }
+  }
   return {
     type: 'string',
     value: input.node.text,
@@ -440,6 +456,7 @@ function processConditionalExpression(input) {
 }
 
 function processBinaryOperator(input) {
+  const childInput = { ...input, scope: 'binary' }
   let sides = []
   let op
   input.node.children.forEach(node => {
@@ -483,34 +500,36 @@ function processBinaryOperator(input) {
         })
         break
       case 'subscript':
-        sides.push(processSubscript({ ...input, node }))
+        sides.push(processSubscript({ ...childInput, node }))
         break
       case 'unary_operator':
-        sides.push(processUnaryOperator({ ...input, node }))
+        sides.push(processUnaryOperator({ ...childInput, node }))
         break
       case 'comparison_operator':
-        sides.push(processComparisonOperator({ ...input, node }))
+        sides.push(processComparisonOperator({ ...childInput, node }))
         break
       case 'binary_operator':
-        sides.push(processBinaryOperator({ ...input, node }))
+        sides.push(processBinaryOperator({ ...childInput, node }))
         break
       case 'attribute':
-        sides.push(processAttribute({ ...input, node }))
+        sides.push(processAttribute({ ...childInput, node }))
         break
       case 'integer':
-        sides.push(processInteger({ ...input, node }))
+        sides.push(processInteger({ ...childInput, node }))
         break
       case 'call':
-        sides.push(processCall({ ...input, node }))
+        sides.push(processCall({ ...childInput, node }))
         break
       case 'float':
-        sides.push(processFloat({ ...input, node }))
+        sides.push(processFloat({ ...childInput, node }))
         break
       case 'parenthesized_expression':
-        sides.push(processParenthesizedExpression({ ...input, node }))
+        sides.push(
+          processParenthesizedExpression({ ...childInput, node }),
+        )
         break
       case 'none':
-        sides.push(processNone({ ...input, node }))
+        sides.push(processNone({ ...childInput, node }))
         break
       default:
         throwNode(node, input.node)
@@ -526,6 +545,7 @@ function processBinaryOperator(input) {
 }
 
 function processArgumentList(input) {
+  const childInput = { ...input, scope: 'argument_list' }
   let args = []
   input.node.children.forEach(node => {
     switch (node.type) {
@@ -534,31 +554,31 @@ function processArgumentList(input) {
       case ',':
         break
       case 'tuple':
-        args.push(processTuplePattern({ ...input, node }))
+        args.push(processTuplePattern({ ...childInput, node }))
         break
       case 'list_splat':
-        args.push(processListSplat({ ...input, node }))
+        args.push(processListSplat({ ...childInput, node }))
         break
       case 'dictionary_splat':
-        args.push(processDictionarySplat({ ...input, node }))
+        args.push(processDictionarySplat({ ...childInput, node }))
         break
       case 'unary_operator':
-        args.push(processUnaryOperator({ ...input, node }))
+        args.push(processUnaryOperator({ ...childInput, node }))
         break
       case 'binary_operator':
-        args.push(processBinaryOperator({ ...input, node }))
+        args.push(processBinaryOperator({ ...childInput, node }))
         break
       case 'attribute':
-        args.push(processAttribute({ ...input, node }))
+        args.push(processAttribute({ ...childInput, node }))
         break
       case 'integer':
-        args.push(processInteger({ ...input, node }))
+        args.push(processInteger({ ...childInput, node }))
         break
       case 'float':
-        args.push(processFloat({ ...input, node }))
+        args.push(processFloat({ ...childInput, node }))
         break
       case 'string':
-        args.push(processString({ ...input, node }))
+        args.push(processString({ ...childInput, node }))
         break
       case 'identifier':
         args.push({
@@ -567,10 +587,10 @@ function processArgumentList(input) {
         })
         break
       case 'call':
-        args.push(processCall({ ...input, node }))
+        args.push(processCall({ ...childInput, node }))
         break
       case 'keyword_argument':
-        args.push(processKeywordArgument({ ...input, node }))
+        args.push(processKeywordArgument({ ...childInput, node }))
         break
       default:
         throwNode(node, input.node)
@@ -602,7 +622,7 @@ function processKeywordArgument(input) {
       case 'false':
         sides.push({
           type: 'boolean',
-          name: node.type,
+          value: node.type,
         })
         break
       case 'float':
@@ -756,6 +776,7 @@ function processRaiseStatement(input) {
 }
 
 function processForStatement(input) {
+  const childInput = { ...input, scope: 'for_statement' }
   let info = { type: 'for_statement' }
   const sides = []
   input.node.children.forEach(node => {
@@ -771,7 +792,7 @@ function processForStatement(input) {
         })
         break
       case 'block':
-        info.body = processBlock({ ...input, node })
+        info.body = processBlock({ ...childInput, node })
         break
       default:
         throwNode(node, input.node)
@@ -871,6 +892,7 @@ function processNotOperator(input) {
 }
 
 function processIfStatement(input) {
+  const childInput = { ...input, scope: 'if_statement' }
   let info = { type: 'if_statement', choices: [] }
   let choice
   input.node.children.forEach(node => {
@@ -889,33 +911,33 @@ function processIfStatement(input) {
         break
       case 'not_operator':
         choice = {}
-        choice.test = processNotOperator({ ...input, node })
+        choice.test = processNotOperator({ ...childInput, node })
         info.choices.push(choice)
         break
       case 'comparison_operator':
         choice = {}
-        choice.test = processComparisonOperator({ ...input, node })
+        choice.test = processComparisonOperator({ ...childInput, node })
         info.choices.push(choice)
         break
       case 'boolean_operator':
         choice = {}
-        choice.test = processComparisonOperator({ ...input, node })
+        choice.test = processComparisonOperator({ ...childInput, node })
         info.choices.push(choice)
         break
       case 'call':
         choice = {}
-        choice.test = processCall({ ...input, node })
+        choice.test = processCall({ ...childInput, node })
         info.choices.push(choice)
         break
       case 'block':
-        choice.body = processBlock({ ...input, node })
+        choice.statements = processBlock({ ...childInput, node })
         break
       case 'else_clause':
-        choice = processElseClause({ ...input, node })
+        choice = processElseClause({ ...childInput, node })
         info.choices.push(choice)
         break
       case 'elif_clause':
-        choice = processElifClause({ ...input, node })
+        choice = processElifClause({ ...childInput, node })
         info.choices.push(choice)
         break
       default:
@@ -945,7 +967,7 @@ function processElifClause(input) {
         choice.test = processComparisonOperator({ ...input, node })
         break
       case 'block':
-        choice.body = processBlock({ ...input, node })
+        choice.statements = processBlock({ ...input, node })
         break
       default:
         throwNode(node, input.node)
@@ -962,7 +984,7 @@ function processElseClause(input) {
       case ':':
         break
       case 'block':
-        choice.body = processBlock({ ...input, node })
+        choice.statements = processBlock({ ...input, node })
         break
       default:
         throwNode(node, input.node)
@@ -1015,15 +1037,25 @@ function processFunctionDefinition(input) {
       case ':':
         break
       case 'parameters':
-        info.parameters.push(...processParameters({ ...input, node }))
+        info.parameters.push(
+          ...processParameters({ ...input, node, scope: 'function' }),
+        )
         break
       case 'block':
-        info.body.push(...processBlock({ ...input, node }))
+        info.body.push(
+          ...processBlock({ ...input, node, scope: 'function' }),
+        )
         break
       case 'comment':
         break
       case 'function_definition':
-        info.body.push(processFunctionDefinition({ ...input, node }))
+        info.body.push(
+          processFunctionDefinition({
+            ...input,
+            node,
+            scope: 'function',
+          }),
+        )
         break
       default:
         throwNode(node, input.node)
@@ -1051,10 +1083,14 @@ function processClassDefinition(input) {
         }
         break
       case 'argument_list':
-        info.args = processArgumentList({ ...input, node })
+        info.args = processArgumentList({
+          ...input,
+          node,
+          scope: 'class',
+        })
         break
       case 'block':
-        info.body = processBlock({ ...input, node })
+        info.body = processBlock({ ...input, node, scope: 'class' })
         break
       default:
         throwNode(node, input.node)
@@ -1101,7 +1137,7 @@ function processDefaultParameter(input) {
       case 'false':
         sides.push({
           type: 'boolean',
-          name: node.type,
+          value: node.type,
         })
         break
       default:
@@ -1207,7 +1243,7 @@ function processTypedDefaultParameter(input) {
       case 'false':
         sides.push({
           type: 'boolean',
-          name: node.type,
+          value: node.type,
         })
         break
       default:
@@ -1314,6 +1350,7 @@ function processDictionarySplat(input) {
 }
 
 function processParameters(input) {
+  const childInput = { ...input, scope: 'parameters' }
   const parameters = []
   let parameter
   input.node.children.forEach(node => {
@@ -1324,11 +1361,14 @@ function processParameters(input) {
       case 'comment':
         break
       case 'list_splat_pattern':
-        parameter = processListSplatPattern({ ...input, node })
+        parameter = processListSplatPattern({ ...childInput, node })
         parameters.push(parameter)
         break
       case 'dictionary_splat_pattern':
-        parameter = processDictionarySplatPattern({ ...input, node })
+        parameter = processDictionarySplatPattern({
+          ...childInput,
+          node,
+        })
         parameters.push(parameter)
         break
       case 'keyword_separator':
@@ -1336,15 +1376,18 @@ function processParameters(input) {
         // don't care about that.
         break
       case 'typed_parameter':
-        parameter = processTypedParameter({ ...input, node })
+        parameter = processTypedParameter({ ...childInput, node })
         parameters.push(parameter)
         break
       case 'typed_default_parameter':
-        parameter = processTypedDefaultParameter({ ...input, node })
+        parameter = processTypedDefaultParameter({
+          ...childInput,
+          node,
+        })
         parameters.push(parameter)
         break
       case 'default_parameter':
-        parameter = processDefaultParameter({ ...input, node })
+        parameter = processDefaultParameter({ ...childInput, node })
         parameters.push(parameter)
         break
       case 'identifier':

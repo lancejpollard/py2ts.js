@@ -36,6 +36,14 @@
         "default": "generic"
       }
     ],
+    "padding-line-between-statements": "off",
+    "@typescript-eslint/padding-line-between-statements": [
+      "error",
+      { "blankLine": "always", "prev": "*", "next": "function" },
+      { "blankLine": "always", "prev": "*", "next": "block" },
+      { "blankLine": "always", "prev": "*", "next": "return" },
+      { "blankLine": "always", "prev": "*", "next": "type" }
+    ],
     "@typescript-eslint/await-thenable": "error",
     "@typescript-eslint/consistent-type-definitions": 0,
     "@typescript-eslint/consistent-type-exports": "error",
@@ -61,15 +69,6 @@
     "@typescript-eslint/lines-between-class-members": "error",
     "object-curly-spacing": "off",
     "@typescript-eslint/object-curly-spacing": [2, "always"],
-    "padding-line-between-statements": "off",
-    "@typescript-eslint/padding-line-between-statements": [
-      "error",
-      {
-        "blankLine": "always",
-        "prev": "*",
-        "next": ["type"]
-      }
-    ],
     "space-before-blocks": "off",
     "@typescript-eslint/space-before-blocks": ["error", "always"],
     "@typescript-eslint/type-annotation-spacing": [
